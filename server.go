@@ -8,6 +8,7 @@ import (
 
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/mem"
 )
 
@@ -16,7 +17,7 @@ type Response struct {
 	CPUUsage    float64 `json:"cpu_usage"`
 	MemoryUsage float64 `json:"memory_usage"`
 	DiskUsage   float64 `json:"disk_usage"`
-	Uptime      string  `json:"uptime"`
+	Uptime      uint64  `json:"uptime"`
 }
 
 func getHostname() string {
@@ -46,6 +47,16 @@ func getMemoryUsage() float64 {
 	return memory.UsedPercent
 }
 
+func getUptime() uint64 {
+	uptimeSeconds, err := host.Uptime()
+	duration := uptimeSeconds / 3600
+	if err != nil {
+		log.Println("Error getting uptime: ", err)
+		return 0
+	}
+	return duration
+}
+
 func getCPUUsage() float64 {
 	cpuUsage, err := cpu.Percent(0, false)
 	if err != nil {
@@ -63,7 +74,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 		CPUUsage:    getCPUUsage(),
 		MemoryUsage: getMemoryUsage(),
 		DiskUsage:   getDiskUsage(),
-		Uptime:      "0s", // Placeholder for actual uptime
+		Uptime:      getUptime(),
 	}
 	log.Println("Sending response:")
 	log.Println(response)
