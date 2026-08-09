@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/mem"
 )
 
@@ -25,6 +26,15 @@ func getHostname() string {
 		return "unknown"
 	}
 	return hostname
+}
+
+func getDiskUsage() float64 {
+	diskUsage, err := disk.Usage("/")
+	if err != nil {
+		log.Println("Error getting disk usage: ", err)
+		return 0.0
+	}
+	return diskUsage.UsedPercent
 }
 
 func getMemoryUsage() float64 {
@@ -49,11 +59,11 @@ func getCPUUsage() float64 {
 func homeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	response := Response{
-		Hostname:    getHostname(),    // Placeholder for actual hostname
-		CPUUsage:    getCPUUsage(),    // Placeholder for actual CPU usage
-		MemoryUsage: getMemoryUsage(), // Placeholder for actual memory usage
-		DiskUsage:   0.0,              // Placeholder for actual disk usage
-		Uptime:      "0s",             // Placeholder for actual uptime
+		Hostname:    getHostname(),
+		CPUUsage:    getCPUUsage(),
+		MemoryUsage: getMemoryUsage(),
+		DiskUsage:   getDiskUsage(),
+		Uptime:      "0s", // Placeholder for actual uptime
 	}
 	log.Println("Sending response:")
 	log.Println(response)
