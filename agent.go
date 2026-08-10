@@ -49,12 +49,11 @@ func getMemoryUsage() float64 {
 
 func getUptime() uint64 {
 	uptimeSeconds, err := host.Uptime()
-	duration := uptimeSeconds / 3600
 	if err != nil {
 		log.Println("Error getting uptime: ", err)
 		return 0
 	}
-	return duration
+	return uptimeSeconds
 }
 
 func getCPUUsage() float64 {

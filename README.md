@@ -37,13 +37,13 @@ Since this is in progress, currently only the server agent is runnable.
 
 ```bash
 # run locally
-go run server.go
+go run agent.go
 
 # build a binary for the current OS
-go build -o server
+go build -o agent
 
 # cross-compile for Windows from Linux/macOS (or vice versa)
-GOOS=windows GOARCH=amd64 go build -o server.exe
+GOOS=windows GOARCH=amd64 go build -o agent.exe
 ```
 
 Once running, the Agent serves stats at:
@@ -56,8 +56,8 @@ GET http://<agent-host>:8080/stats
 
 - [x] Walking-skeleton HTTP server with `/stats` endpoint
 - [x] Real hostname, CPU, and memory metrics via `gopsutil`
-- [ ] Real disk usage metrics
-- [ ] Real uptime metrics
+- [x] Real disk usage metrics
+- [x] Real uptime metrics
 - [ ] Backend service that polls Agents across the home network
 - [ ] Authentication for remote actions (non-negotiable before restart ships)
 - [ ] Remote restart capability
