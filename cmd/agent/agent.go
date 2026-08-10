@@ -6,19 +6,13 @@ import (
 	"net/http"
 	"os"
 
+	"homeserver-monitor/internal/stats"
+
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/mem"
 )
-
-type Response struct {
-	Hostname    string  `json:"hostname"`
-	CPUUsage    float64 `json:"cpu_usage"`
-	MemoryUsage float64 `json:"memory_usage"`
-	DiskUsage   float64 `json:"disk_usage"`
-	Uptime      uint64  `json:"uptime"`
-}
 
 func getHostname() string {
 	hostname, err := os.Hostname()
@@ -68,7 +62,7 @@ func getCPUUsage() float64 {
 
 func homeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	response := Response{
+	response := stats.Response{
 		Hostname:    getHostname(),
 		CPUUsage:    getCPUUsage(),
 		MemoryUsage: getMemoryUsage(),
