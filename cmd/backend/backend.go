@@ -4,12 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"homeserver-monitor/internal/stats"
-	"log"
 	"net/http"
 	"time"
 )
 
-var serverAddresses = [2]string{
+var serverAddresses = []string{
 	"localhost:8080", // placeholder
 	"localhost:8081", // placeholder
 }
@@ -28,7 +27,6 @@ func poll(server string) AgentResponse {
 
 	response, err := client.Get("http://" + server + "/stats")
 	if err != nil {
-		log.Println("Error polling server: ", err)
 		return AgentResponse{Address: server, Err: err}
 	}
 
@@ -36,14 +34,12 @@ func poll(server string) AgentResponse {
 
 	if response.StatusCode != http.StatusOK {
 		err = fmt.Errorf("unexpected status: %s", response.Status)
-		log.Println("Error polling server: ", err)
 		return AgentResponse{Address: server, Err: err}
 	}
 
 	var statsResponse stats.Response
 	err = json.NewDecoder(response.Body).Decode(&statsResponse)
 	if err != nil {
-		log.Println("Error decoding response from server ", server, ": ", err)
 		return AgentResponse{Address: server, Err: err}
 	}
 
@@ -51,12 +47,10 @@ func poll(server string) AgentResponse {
 }
 
 func main() {
+	var responses = []AgentResponse{}
 	for _, server := range serverAddresses {
 		result := poll(server)
-		if result.Err != nil {
-			log.Println("Error polling server ", server, ": ", result.Err)
-			continue
-		}
-		log.Printf("Stats from server %s: %+v\n", result.Address, result.Data)
+		responses = append(responses, result)
 	}
+	fmt.Printf("%+v\n", responses)
 }
