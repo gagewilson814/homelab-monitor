@@ -1,8 +1,13 @@
+// How often the dashboard re-queries the backend (every 5s). The backend
+// itself polls each agent, so this just controls how fast the view updates.
 const POLL_INTERVAL_MS = 5000;
 
+// DOM anchors used by the render/update loop.
 const fleetEl = document.getElementById("fleet");
 const statusEl = document.getElementById("status");
 
+// Format a raw second count as a human string like "3d 5h 12m", dropping
+// the empty higher-order units (so 90 minutes won't print "0d 1h 30m").
 function formatUptime(seconds) {
   const d = Math.floor(seconds / 86400);
   const h = Math.floor((seconds % 86400) / 3600);
@@ -14,12 +19,15 @@ function formatUptime(seconds) {
   return parts.join(" ");
 }
 
+// Map a percentage to a CSS class that colors its bar: green default,
+// yellow from 70%, red from 90%.
 function barClass(pct) {
   if (pct >= 90) return "bad";
   if (pct >= 70) return "warn";
   return "";
 }
 
+// Build one metric row (label + colored bar + value) for a card.
 function metricRow(label, pct) {
   return `
     <div class="metric">
@@ -29,6 +37,9 @@ function metricRow(label, pct) {
     </div>`;
 }
 
+// Render a single agent card. Offline agents (with an error) get a distinct
+// "offline" styling and show the failure reason; healthy agents render
+// their hostname and metric rows.
 function renderCard(agent) {
   if (agent.error) {
     return `
@@ -50,9 +61,16 @@ function renderCard(agent) {
     </div>`;
 }
 
+// Fetch the aggregated fleet, re-render every card, and flip the status
+// pill to live/error. Errors are caught so a failed poll doesn't crash the
+// page — it just shows the error state until the next successful poll.
 async function refresh() {
   try {
     const res = await fetch("/api/fleet");
+    if (res.status === 401) {
+      window.location.href = "/login.html";
+      return;
+    }
     if (!res.ok) throw new Error(`backend returned ${res.status}`);
     const agents = await res.json();
 
@@ -65,5 +83,11 @@ async function refresh() {
   }
 }
 
+document.getElementById("logout").addEventListener("click", async () => {
+  await fetch("/api/logout", { method: "POST" });
+  window.location.href = "/login.html";
+});
+
+// Kick off the first load, then poll on the interval above.
 refresh();
 setInterval(refresh, POLL_INTERVAL_MS);

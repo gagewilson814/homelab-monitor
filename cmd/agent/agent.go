@@ -1,3 +1,7 @@
+// Command agent runs on each machine in the fleet. It exposes a single
+// /stats HTTP endpoint that reports this machine's hostname, CPU, memory,
+// disk and uptime as JSON. gopsutil is used for the metrics and the binary
+// is compiled statically so the same source runs on Linux and Windows.
 package main
 
 import (
@@ -14,6 +18,8 @@ import (
 	"github.com/shirou/gopsutil/v4/mem"
 )
 
+// getHostname returns the machine's name, falling back to "unknown" if the
+// OS refuses to report one.
 func getHostname() string {
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -23,6 +29,7 @@ func getHostname() string {
 	return hostname
 }
 
+// getDiskUsage reports the percentage of the root filesystem that is used.
 func getDiskUsage() float64 {
 	diskUsage, err := disk.Usage("/")
 	if err != nil {
@@ -32,6 +39,7 @@ func getDiskUsage() float64 {
 	return diskUsage.UsedPercent
 }
 
+// getMemoryUsage reports the percentage of physical RAM that is in use.
 func getMemoryUsage() float64 {
 	memory, err := mem.VirtualMemory()
 	if err != nil {
@@ -41,6 +49,7 @@ func getMemoryUsage() float64 {
 	return memory.UsedPercent
 }
 
+// getUptime returns the number of seconds the machine has been running.
 func getUptime() uint64 {
 	uptimeSeconds, err := host.Uptime()
 	if err != nil {
@@ -50,6 +59,9 @@ func getUptime() uint64 {
 	return uptimeSeconds
 }
 
+// getCPUUsage returns instantaneous CPU utilization as a percentage. The
+// Percent call with a 0 duration samples the running load across all cores;
+// the result comes back as a slice (one entry per core) so we take [0].
 func getCPUUsage() float64 {
 	cpuUsage, err := cpu.Percent(0, false)
 	if err != nil {
@@ -57,9 +69,11 @@ func getCPUUsage() float64 {
 		return 0.0
 	}
 	return cpuUsage[0]
-
 }
 
+// homeHandler builds the stats payload and writes it as JSON to the client.
+// Every metric is gathered independently and defaults to 0 on error so a
+// single failing sensor never breaks the whole response.
 func homeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	response := stats.Response{
@@ -78,6 +92,8 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	// The port is configurable so several agents can run on one host during
+	// testing; it defaults to :8080 to match the documented fleet layout.
 	port := os.Getenv("AGENT_PORT")
 	if port == "" {
 		port = "8080"

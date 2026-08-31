@@ -1,3 +1,7 @@
+/* Dashboard theme. Dark palette plus three semantic accent colors used
+   throughout: --ok (healthy), --warn (70%+), and --bad (90%+) which also
+   marks offline agents. */
+
 :root {
   color-scheme: dark;
   --bg: #0f1115;
@@ -32,6 +36,67 @@ h1 { font-size: 1.25rem; margin: 0; }
 .status { color: var(--muted); font-size: 0.85rem; }
 .status.live { color: var(--ok); }
 .status.error { color: var(--bad); }
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.logout-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.logout-btn:hover { color: var(--text); border-color: var(--muted); }
+
+.login-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+}
+
+.login-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  width: 260px;
+}
+
+.login-card h1 {
+  font-size: 1.1rem;
+  margin: 0 0 0.5rem;
+  text-align: center;
+}
+
+.login-card input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.9rem;
+}
+
+.login-card button {
+  background: var(--ok);
+  color: #0f1115;
+  border: none;
+  border-radius: 6px;
+  padding: 0.5rem;
+  font-weight: 600;
+  cursor: pointer;
+}
 
 .fleet {
   display: grid;

@@ -12,7 +12,7 @@ Most existing monitoring tools are either overkill for a home lab or don't suppo
 
 - **Agent** (Go) — runs on each monitored machine. Exposes a `/stats` HTTP endpoint that returns hostname, CPU usage, memory usage, disk usage, and uptime as JSON. Uses [`gopsutil`](https://github.com/shirou/gopsutil) for cross-platform system metrics, and compiles to a single static binary for both Linux and Windows.
 - **Backend** (Go) — a central service running on the home network that polls all Agents concurrently (one goroutine per agent, pull model — no NAT/port-forwarding complexity since everything stays on the home network or a VPN), aggregates the results, and exposes them as JSON at `/api/fleet`. Also serves the static frontend.
-- **Frontend** — a minimal vanilla JS/HTML/CSS dashboard served by the Backend. Polls `/api/fleet` every 5s and renders live per-agent stat cards, including agents that are unreachable. No login or database yet — see Roadmap.
+- **Frontend** — a minimal vanilla JS/HTML/CSS dashboard served by the Backend. Polls `/api/fleet` every 5s and renders live per-agent stat cards, including agents that are unreachable. Gated behind a login page; no database yet — see Roadmap.
 
 ```
 [ Agent : Linux server ]  \
@@ -26,8 +26,8 @@ Most existing monitoring tools are either overkill for a home lab or don't suppo
 |-----------|----------------------------------------|
 | Agent     | Go, [gopsutil](https://github.com/shirou/gopsutil) |
 | Backend   | Go (goroutines for concurrent polling) |
-| Frontend  | Vanilla JavaScript + HTML/CSS (SQL + login planned) |
-| Auth      | TBD — required before any remote-restart capability ships |
+| Frontend  | Vanilla JavaScript + HTML/CSS (SQL-backed multi-user login planned) |
+| Auth      | Single-user session cookie (bcrypt password, in-memory sessions) |
 
 ## Getting Started
 
@@ -61,18 +61,30 @@ GET http://<agent-host>:<port>/stats
 
 The backend must be run from the repo root (it serves the `web/` directory) or run through the go tool below. It polls agents listed in the comma-separated `HOMELAB_AGENTS` env var (defaults to `localhost:8080,localhost:8081`).
 
+The dashboard and `/api/fleet` require a login. Set `HOMELAB_PASSWORD_HASH` to a bcrypt hash of your chosen password — the backend refuses to start without it. Generate one with the bundled `hashpw` tool:
+
 ```bash
-# run locally, override which agents to poll
-HOMELAB_AGENTS="192.168.1.10:8080,192.168.1.11:8080" go run ./cmd/backend
+go run ./cmd/hashpw
+# Password: <type your password, Enter>
+# $2a$10$...
 ```
 
-Then open the dashboard:
+Then run the backend with that hash:
+
+```bash
+# run locally, override which agents to poll
+HOMELAB_PASSWORD_HASH='$2a$10$...' HOMELAB_AGENTS="192.168.1.10:8080,192.168.1.11:8080" go run ./cmd/backend
+```
+
+Then open the dashboard and log in:
 
 ```
 http://localhost:9090/
 ```
 
-Aggregated JSON is also available directly at `http://localhost:9090/api/fleet`.
+Sessions are cookie-based, last 24h, and are held in memory (a backend restart logs everyone out). Agents themselves are not authenticated — they're only expected to be reachable from the home network/VPN, not the public internet.
+
+Aggregated JSON is also available directly at `http://localhost:9090/api/fleet` (requires the same session cookie).
 
 ## Roadmap
 
@@ -81,8 +93,8 @@ Aggregated JSON is also available directly at `http://localhost:9090/api/fleet`.
 - [x] Real disk usage metrics
 - [x] Real uptime metrics
 - [x] Backend service that polls Agents across the home network (concurrent, via goroutines)
-- [x] Minimal read-only web dashboard (no login/SQL yet)
-- [ ] Authentication for remote actions (non-negotiable before restart ships)
+- [x] Minimal read-only web dashboard (no SQL yet)
+- [x] Single-user session-cookie authentication for the dashboard/API (non-negotiable before restart ships)
 - [ ] Remote restart capability
 - [ ] SQL-backed dashboard with user login
 - [ ] Mobile-friendly / installable (PWA) dashboard access

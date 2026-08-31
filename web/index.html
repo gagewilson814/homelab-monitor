@@ -9,8 +9,14 @@
 <body>
 <header>
   <h1>Homelab Monitor</h1>
-  <span id="status" class="status">connecting…</span>
+  <div class="header-right">
+    <!-- Live/connection indicator shown in the top bar; green when a poll
+         succeeds, red on failure. -->
+    <span id="status" class="status">connecting…</span>
+    <button id="logout" class="logout-btn">Log out</button>
+  </div>
 </header>
+<!-- Each agent renders as a card below; populated by app.js. -->
 <main id="fleet" class="fleet"></main>
 <script src="app.js"></script>
 </body>
