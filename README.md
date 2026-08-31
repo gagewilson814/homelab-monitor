@@ -11,12 +11,12 @@ Most existing monitoring tools are either overkill for a home lab or don't suppo
 ## Architecture
 
 - **Agent** (Go) — runs on each monitored machine. Exposes a `/stats` HTTP endpoint that returns hostname, CPU usage, memory usage, disk usage, and uptime as JSON. Uses [`gopsutil`](https://github.com/shirou/gopsutil) for cross-platform system metrics, and compiles to a single static binary for both Linux and Windows.
-- **Backend** *(planned)* — a central service running on the home network that polls each Agent directly (pull model — no NAT/port-forwarding complexity since everything stays on the home network or a VPN) and exposes an aggregated API to the frontend.
-- **Frontend** *(planned)* — a JavaScript web dashboard, backed by a SQL database, with user login, for visualizing the fleet and triggering remote actions from a phone.
+- **Backend** (Go) — a central service running on the home network that polls all Agents concurrently (one goroutine per agent, pull model — no NAT/port-forwarding complexity since everything stays on the home network or a VPN), aggregates the results, and exposes them as JSON at `/api/fleet`. Also serves the static frontend.
+- **Frontend** — a minimal vanilla JS/HTML/CSS dashboard served by the Backend. Polls `/api/fleet` every 5s and renders live per-agent stat cards, including agents that are unreachable. No login or database yet — see Roadmap.
 
 ```
 [ Agent : Linux server ]  \
-[ Agent : Linux server ]   >---(Backend polls each Agent)---> [ Backend API ] ---> [ Web Dashboard ]
+[ Agent : Linux server ]   >---(Backend polls each Agent concurrently)---> [ Backend API :9090 ] ---> [ Web Dashboard ]
 [ Agent : Windows server]  /
 ```
 
@@ -25,32 +25,54 @@ Most existing monitoring tools are either overkill for a home lab or don't suppo
 | Layer     | Tech                                  |
 |-----------|----------------------------------------|
 | Agent     | Go, [gopsutil](https://github.com/shirou/gopsutil) |
-| Backend   | Go (planned)                          |
-| Frontend  | JavaScript + SQL database (planned)   |
+| Backend   | Go (goroutines for concurrent polling) |
+| Frontend  | Vanilla JavaScript + HTML/CSS (SQL + login planned) |
 | Auth      | TBD — required before any remote-restart capability ships |
 
-## Getting Started (Agent)
+## Getting Started
 
 Requires [Go](https://go.dev/dl/) installed.
 
-Since this is in progress, currently only the server agent is runnable.
+### Agent
+
+Run one instance per monitored machine (or multiple locally on different ports for testing via `AGENT_PORT`):
 
 ```bash
-# run locally
-go run agent.go
+# run locally (defaults to :8080)
+go run ./cmd/agent
+
+# run on a different port
+AGENT_PORT=8081 go run ./cmd/agent
 
 # build a binary for the current OS
-go build -o agent
+go build -o agent ./cmd/agent
 
 # cross-compile for Windows from Linux/macOS (or vice versa)
-GOOS=windows GOARCH=amd64 go build -o agent.exe
+GOOS=windows GOARCH=amd64 go build -o agent.exe ./cmd/agent
 ```
 
 Once running, the Agent serves stats at:
 
 ```
-GET http://<agent-host>:8080/stats
+GET http://<agent-host>:<port>/stats
 ```
+
+### Backend + Dashboard
+
+The backend must be run from the repo root (it serves the `web/` directory) or run through the go tool below. It polls agents listed in the comma-separated `HOMELAB_AGENTS` env var (defaults to `localhost:8080,localhost:8081`).
+
+```bash
+# run locally, override which agents to poll
+HOMELAB_AGENTS="192.168.1.10:8080,192.168.1.11:8080" go run ./cmd/backend
+```
+
+Then open the dashboard:
+
+```
+http://localhost:9090/
+```
+
+Aggregated JSON is also available directly at `http://localhost:9090/api/fleet`.
 
 ## Roadmap
 
@@ -58,10 +80,11 @@ GET http://<agent-host>:8080/stats
 - [x] Real hostname, CPU, and memory metrics via `gopsutil`
 - [x] Real disk usage metrics
 - [x] Real uptime metrics
-- [ ] Backend service that polls Agents across the home network
+- [x] Backend service that polls Agents across the home network (concurrent, via goroutines)
+- [x] Minimal read-only web dashboard (no login/SQL yet)
 - [ ] Authentication for remote actions (non-negotiable before restart ships)
 - [ ] Remote restart capability
-- [ ] Web dashboard (JS + SQL + login)
+- [ ] SQL-backed dashboard with user login
 - [ ] Mobile-friendly / installable (PWA) dashboard access
 
 ## License

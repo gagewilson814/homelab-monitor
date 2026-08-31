@@ -78,7 +78,11 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	port := os.Getenv("AGENT_PORT")
+	if port == "" {
+		port = "8080"
+	}
 	http.HandleFunc("/stats", homeHandler)
-	log.Println("Server starting on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Println("Server starting on :" + port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }

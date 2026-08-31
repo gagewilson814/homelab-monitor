@@ -4,19 +4,34 @@ import (
 	"encoding/json"
 	"fmt"
 	"homeserver-monitor/internal/stats"
+	"log"
 	"net/http"
+	"os"
+	"strings"
+	"sync"
 	"time"
 )
 
-var serverAddresses = []string{
-	"localhost:8080", // placeholder
-	"localhost:8081", // placeholder
+var serverAddresses = getServerAddresses()
+
+func getServerAddresses() []string {
+	if env := os.Getenv("HOMELAB_AGENTS"); env != "" {
+		var addresses []string
+		for _, addr := range strings.Split(env, ",") {
+			addr = strings.TrimSpace(addr)
+			if addr != "" {
+				addresses = append(addresses, addr)
+			}
+		}
+		return addresses
+	}
+	return []string{"localhost:8080", "localhost:8081"}
 }
 
 type AgentResponse struct {
-	Address string
-	Data    stats.Response
-	Err     error
+	Address string          `json:"address"`
+	Data    *stats.Response `json:"data,omitempty"`
+	Err     string          `json:"error,omitempty"`
 }
 
 func poll(server string) AgentResponse {
@@ -27,30 +42,54 @@ func poll(server string) AgentResponse {
 
 	response, err := client.Get("http://" + server + "/stats")
 	if err != nil {
-		return AgentResponse{Address: server, Err: err}
+		return AgentResponse{Address: server, Err: err.Error()}
 	}
 
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
-		err = fmt.Errorf("unexpected status: %s", response.Status)
-		return AgentResponse{Address: server, Err: err}
+		return AgentResponse{Address: server, Err: fmt.Sprintf("unexpected status: %s", response.Status)}
 	}
 
 	var statsResponse stats.Response
 	err = json.NewDecoder(response.Body).Decode(&statsResponse)
 	if err != nil {
-		return AgentResponse{Address: server, Err: err}
+		return AgentResponse{Address: server, Err: err.Error()}
 	}
 
-	return AgentResponse{Address: server, Data: statsResponse}
+	return AgentResponse{Address: server, Data: &statsResponse}
+}
+
+func pollAll(servers []string) []AgentResponse {
+	results := make([]AgentResponse, len(servers))
+
+	var wg sync.WaitGroup
+	for i, server := range servers {
+		wg.Add(1)
+		go func(i int, server string) {
+			defer wg.Done()
+			results[i] = poll(server)
+		}(i, server)
+	}
+	wg.Wait()
+
+	return results
+}
+
+func fleetHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	results := pollAll(serverAddresses)
+	if err := json.NewEncoder(w).Encode(results); err != nil {
+		log.Println("Error encoding JSON response: ", err)
+	}
 }
 
 func main() {
-	var responses = []AgentResponse{}
-	for _, server := range serverAddresses {
-		result := poll(server)
-		responses = append(responses, result)
-	}
-	fmt.Printf("%+v\n", responses)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/fleet", fleetHandler)
+	mux.Handle("/", http.FileServer(http.Dir("web")))
+
+	log.Println("Polling agents:", serverAddresses)
+	log.Println("Backend starting on :9090")
+	log.Fatal(http.ListenAndServe(":9090", mux))
 }

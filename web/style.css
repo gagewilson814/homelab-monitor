@@ -1,0 +1,99 @@
+:root {
+  color-scheme: dark;
+  --bg: #0f1115;
+  --card: #1a1d24;
+  --border: #2a2e37;
+  --text: #e6e9ef;
+  --muted: #8b91a0;
+  --ok: #3ddc84;
+  --warn: #f5c542;
+  --bad: #f2545b;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.25rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+h1 { font-size: 1.25rem; margin: 0; }
+
+.status { color: var(--muted); font-size: 0.85rem; }
+.status.live { color: var(--ok); }
+.status.error { color: var(--bad); }
+
+.fleet {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 1rem;
+  padding: 1.5rem;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem 1.25rem;
+}
+
+.card h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ok);
+  flex-shrink: 0;
+}
+
+.card.offline .dot { background: var(--bad); }
+
+.metric {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin: 0.35rem 0;
+}
+
+.metric span:last-child { color: var(--text); font-variant-numeric: tabular-nums; }
+
+.metric .bar {
+  flex: 1;
+  height: 6px;
+  background: #262a33;
+  border-radius: 4px;
+  margin: 0 0.6rem;
+  overflow: hidden;
+}
+
+.metric .bar > i {
+  display: block;
+  height: 100%;
+  background: var(--ok);
+}
+
+.metric .bar > i.warn { background: var(--warn); }
+.metric .bar > i.bad { background: var(--bad); }
+
+.error-text {
+  color: var(--bad);
+  font-size: 0.85rem;
+}
