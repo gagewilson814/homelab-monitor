@@ -5,6 +5,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -27,6 +28,28 @@ import (
 // configuredServices lists which local services to check alongside the
 // standard host metrics. Parsed once at startup from HOMELAB_SERVICES.
 var configuredServices = getConfiguredServices()
+
+// agentTokenHeader is the header the backend's poll() sends its shared
+// secret in - the two names must match, since they're the same string
+// literal maintained independently in cmd/backend/backend.go.
+const agentTokenHeader = "X-Homelab-Agent-Token"
+
+// agentToken is the shared secret /stats requires, if any. Left unset (the
+// default), homeHandler serves every request exactly as it did before this
+// existed - opting in requires setting HOMELAB_AGENT_TOKEN here *and* on
+// the backend that polls this agent.
+var agentToken = os.Getenv("HOMELAB_AGENT_TOKEN")
+
+// validAgentToken reports whether a request's token header is acceptable:
+// always true when agentToken is unset, otherwise a constant-time compare
+// against what the caller sent, so response timing can't be used to guess
+// the token byte by byte.
+func validAgentToken(got string) bool {
+	if agentToken == "" {
+		return true
+	}
+	return subtle.ConstantTimeCompare([]byte(got), []byte(agentToken)) == 1
+}
 
 type serviceConfig struct {
 	Name string
@@ -158,6 +181,11 @@ func getCPUUsage() float64 {
 // Every metric is gathered independently and defaults to 0 on error so a
 // single failing sensor never breaks the whole response.
 func homeHandler(w http.ResponseWriter, r *http.Request) {
+	if !validAgentToken(r.Header.Get(agentTokenHeader)) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	response := stats.Response{
 		Hostname:    getHostname(),
@@ -184,6 +212,11 @@ func main() {
 	}
 	if len(configuredServices) > 0 {
 		log.Println("Checking services:", configuredServices)
+	}
+	if agentToken != "" {
+		log.Println("Agent token auth enabled (HOMELAB_AGENT_TOKEN set) - /stats requires a matching", agentTokenHeader, "header")
+	} else {
+		log.Println("Agent token auth disabled - set HOMELAB_AGENT_TOKEN on both this agent and the backend to require it")
 	}
 	http.HandleFunc("/stats", homeHandler)
 

@@ -9,7 +9,7 @@
  *     versions and claims the client so the new shell serves immediately.
  */
 
-const CACHE_VERSION = "v4";
+const CACHE_VERSION = "v5";
 const SHELL_CACHE = CACHE_VERSION + ":shell";
 const API_CACHE = CACHE_VERSION + ":api";
 
@@ -19,6 +19,7 @@ const SHELL = [
   "login.html",
   "app.js",
   "login.js",
+  "register-sw.js",
   "style.css",
   "manifest.json",
   "icon.svg",
@@ -26,7 +27,32 @@ const SHELL = [
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(SHELL_CACHE).then((cache) => cache.addAll(SHELL))
+    caches.open(SHELL_CACHE).then((cache) =>
+      Promise.all(
+        SHELL.map((path) => {
+          // Go's http.FileServer 301-redirects a literal "index.html"
+          // request to "./" (a stdlib canonicalization - it fires even when
+          // authenticated, nothing to do with login). cache.addAll(SHELL)
+          // used to fetch "index.html" as-is and cache the *followed*
+          // redirect response; a redirected Response served later from
+          // respondWith() makes the browser replay that redirect on the
+          // real navigation instead of just rendering the page. Fetch "/"
+          // for that one entry instead, but still cache it under the
+          // "index.html" key so the fetch handler's lookup below still
+          // finds it.
+          const fetchPath = path === "index.html" ? "/" : path;
+          return fetch(fetchPath).then((resp) => {
+            // Also guard the general case: any entry that came back
+            // redirected (e.g. install racing an expired session) is
+            // skipped rather than cached wrong - it'll be picked up by a
+            // later, successful install.
+            if (!resp || resp.status >= 400 || resp.redirected) return;
+            const shellURL = new URL(path, self.location.origin).toString();
+            return cache.put(shellURL, resp);
+          });
+        })
+      )
+    )
   );
 });
 

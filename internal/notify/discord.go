@@ -33,12 +33,31 @@ func NewDiscord(webhookURL string) *Discord {
 	}
 }
 
+// webhookPayload is the JSON body posted to the Discord webhook.
+type webhookPayload struct {
+	Content string `json:"content"`
+	// AllowedMentions restricts which mentions in Content actually notify
+	// anyone. Discord parses @everyone/@here/role mentions in content by
+	// default when this is omitted - and content is built from agent-
+	// supplied data (hostname) and user-supplied data (a tag), either of
+	// which could contain "@everyone" and mass-ping the channel on every
+	// alert. An empty Parse list means "resolve no mentions at all".
+	AllowedMentions allowedMentions `json:"allowed_mentions"`
+}
+
+type allowedMentions struct {
+	Parse []string `json:"parse"`
+}
+
 func (d *Discord) Send(content string) error {
 	if d.webhookURL == "" {
 		return nil
 	}
 
-	body, err := json.Marshal(map[string]string{"content": content})
+	body, err := json.Marshal(webhookPayload{
+		Content:         content,
+		AllowedMentions: allowedMentions{Parse: []string{}},
+	})
 	if err != nil {
 		return err
 	}

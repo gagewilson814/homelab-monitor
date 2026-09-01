@@ -100,17 +100,7 @@
   </div>
 </div>
 
-<script>
-  // Register the service worker for offline/installable support. No-op on
-  // browsers without SW support; only takes effect over HTTPS or localhost.
-  if ("serviceWorker" in navigator) {
-    window.addEventListener("load", function () {
-      navigator.serviceWorker.register("/sw.js").catch(function (err) {
-        console.debug("Service worker registration failed:", err);
-      });
-    });
-  }
-</script>
+<script src="register-sw.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -19,7 +19,7 @@ func TestDiscordDisabledWhenUnconfigured(t *testing.T) {
 }
 
 func TestDiscordSendsContentToWebhook(t *testing.T) {
-	var gotBody map[string]string
+	var gotBody webhookPayload
 	var gotPath string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,8 +38,37 @@ func TestDiscordSendsContentToWebhook(t *testing.T) {
 	if gotPath != "/" {
 		t.Errorf("path = %q, want /", gotPath)
 	}
-	if gotBody["content"] != "server is back online" {
-		t.Errorf("content = %q, want the message", gotBody["content"])
+	if gotBody.Content != "server is back online" {
+		t.Errorf("content = %q, want the message", gotBody.Content)
+	}
+}
+
+// A hostname or tag containing "@everyone" ends up in an alert's content
+// (see displayName in cmd/backend), and Discord parses mentions in content
+// by default. Without allowed_mentions restricting that, a monitored
+// machine could mass-ping the whole channel just by being named badly.
+func TestDiscordSuppressesMentions(t *testing.T) {
+	var gotBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &gotBody)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	d := NewDiscord(srv.URL)
+	if err := d.Send("@everyone the NAS is offline"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	allowed, ok := gotBody["allowed_mentions"].(map[string]any)
+	if !ok {
+		t.Fatalf("allowed_mentions missing or wrong shape in payload: %#v", gotBody)
+	}
+	parse, ok := allowed["parse"].([]any)
+	if !ok || len(parse) != 0 {
+		t.Errorf("allowed_mentions.parse = %#v, want an empty array", allowed["parse"])
 	}
 }
 

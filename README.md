@@ -92,9 +92,23 @@ Then open the dashboard and log in:
 http://localhost:9090/
 ```
 
-Sessions are cookie-based, last 24h, and are held in memory (a backend restart logs everyone out). Agents themselves are not authenticated — they're only expected to be reachable from the home network/VPN, not the public internet.
+Sessions are cookie-based, last 24h, and are held in memory (a backend restart logs everyone out). By default agents aren't authenticated - they're only expected to be reachable from the home network/VPN, not the public internet. If the backend is reachable from further away than that (e.g. over Tailscale, not just physically at home), set `HOMELAB_AGENT_TOKEN` - see [Securing agent polling](#securing-agent-polling) below.
 
 Aggregated JSON is also available directly at `http://localhost:9090/api/fleet` (requires the same session cookie).
+
+### Securing agent polling (optional, recommended over Tailscale/VPN)
+
+Set `HOMELAB_AGENT_TOKEN` to the same value on the backend *and* every agent that should require it, and the backend sends it as an `X-Homelab-Agent-Token` header on every poll - an agent with the token set rejects any request missing it or carrying the wrong one (`401`), and the mismatch shows up as that agent going "offline" on the dashboard rather than failing silently. Leave it unset (the default) to poll agents unauthenticated, same as before this existed.
+
+```bash
+# on the backend
+HOMELAB_PASSWORD_HASH='$2a$10$...' HOMELAB_AGENT_TOKEN='some-long-random-string' go run ./cmd/backend
+
+# on each agent
+HOMELAB_AGENT_TOKEN='some-long-random-string' go run ./cmd/agent
+```
+
+This matters more once the dashboard is reachable from outside your home network (Tailscale, a VPN) rather than strictly a physical LAN: without it, anything that can reach an agent's port can read its stats, and - more importantly - anything that can reach the backend's poll path could stand in for a real agent and feed the dashboard whatever it wants. `HOMELAB_AGENT_TOKEN` closes that off cheaply, without needing TLS or per-agent certificates.
 
 ### Discord alerts (optional)
 
@@ -158,10 +172,10 @@ Tests use the standard library `testing` framework with `net/http/httptest` fake
 |---------|---------------|
 | `internal/auth` | login/logout flow, bad password, missing hash, oversized body, logout method |
 | `internal/stats` | `stats()` response shape + JSON wire format |
-| `internal/notify` | Discord `Send` is a no-op when the webhook is unset; error on a bad status; errors don't leak the webhook token |
+| `internal/notify` | Discord `Send` is a no-op when the webhook is unset; error on a bad status; errors don't leak the webhook token; mentions are suppressed |
 | `internal/alert` | debounce thresholds, online/offline transitions, forgetting a removed agent |
 | `internal/agentstore` | persisted agent CRUD, address validation, UTF-8-safe tag limits, atomic writes surviving a reload |
-| `cmd/backend` | `poll`/`pollAll` error handling, alert transitions, threshold alerts, last-seen tracking, fleet/alerts/agents handlers + auth gate, agent-list parsing |
+| `cmd/backend` | `poll`/`pollAll` error handling, alert transitions, threshold alerts, last-seen tracking, fleet/alerts/agents handlers + auth gate, agent-list parsing, agent-token header, CSP header |
 
 Everything runs on the same platform you build on. The `gopsutil`-based stats tests only cover the host they run on, but the backend and agent logic is platform-independent.
 
@@ -172,6 +186,7 @@ Everything runs on the same platform you build on. The `gopsutil`-based stats te
 | `HOMELAB_PASSWORD_HASH` | bcrypt hash of the dashboard/API password (required) | — |
 | `HOMELAB_AGENTS` | comma-separated `host:port` agents to poll - only used to seed `HOMELAB_AGENTS_FILE` the first time it doesn't exist | `localhost:8080,localhost:8081` |
 | `HOMELAB_AGENTS_FILE` | JSON file persisting the agent list/tags managed from the dashboard | `data/agents.json` |
+| `HOMELAB_AGENT_TOKEN` | shared secret sent to (backend) / required by (agent) `/stats` - set identically on both sides; see [Securing agent polling](#securing-agent-polling) | unset = agents unauthenticated |
 | `HOMELAB_POLL_INTERVAL` | backend poll cadence, in seconds | `5` |
 | `DISCORD_WEBHOOK_URL` | Discord webhook for online/offline alerts (optional) | unset = no alerts |
 | `DISCORD_ALERT_THRESHOLD` | consecutive polls to confirm a transition | `2` |
@@ -197,6 +212,7 @@ Everything runs on the same platform you build on. The `gopsutil`-based stats te
 - [x] Agents run as a system service (systemd/Windows service) so they survive a reboot unattended
 - [x] Add/remove/tag agents from the dashboard, persisted across restarts and logins (no more fixed two-agent env var)
 - [x] Metric history sparklines, an aggregated alerts view, and mobile-first chrome (bottom nav, loading/error/empty states)
+- [x] Security hardening: strict CSP, optional agent shared-secret auth (`HOMELAB_AGENT_TOKEN`), Discord mentions suppressed
 - [ ] Remote restart capability (deprioritized for now)
 - [ ] SQL-backed dashboard with user login
 

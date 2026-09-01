@@ -170,6 +170,68 @@ func TestPollSuccess(t *testing.T) {
 	}
 }
 
+func TestPollSendsAgentTokenWhenConfigured(t *testing.T) {
+	var gotHeader string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader = r.Header.Get(agentTokenHeader)
+		json.NewEncoder(w).Encode(stats.Response{Hostname: "node1"})
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	orig := agentToken
+	agentToken = "s3cret"
+	defer func() { agentToken = orig }()
+
+	if res := poll(addr); res.Err != "" {
+		t.Fatalf("poll: unexpected error %q", res.Err)
+	}
+	if gotHeader != "s3cret" {
+		t.Errorf("agent saw token header %q, want %q", gotHeader, "s3cret")
+	}
+}
+
+func TestPollSendsNoTokenHeaderByDefault(t *testing.T) {
+	var sawHeader bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawHeader = r.Header.Get(agentTokenHeader) != ""
+		json.NewEncoder(w).Encode(stats.Response{Hostname: "node1"})
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	orig := agentToken
+	agentToken = ""
+	defer func() { agentToken = orig }()
+
+	if res := poll(addr); res.Err != "" {
+		t.Fatalf("poll: unexpected error %q", res.Err)
+	}
+	if sawHeader {
+		t.Error("poll sent a token header even though agentToken is unset")
+	}
+}
+
+func TestSecurityHeadersSetsCSP(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	rr := httptest.NewRecorder()
+	securityHeaders(inner).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	got := rr.Header().Get("Content-Security-Policy")
+	if got == "" {
+		t.Fatal("securityHeaders did not set a Content-Security-Policy header")
+	}
+	if !strings.Contains(got, "script-src 'self'") {
+		t.Errorf("CSP = %q, want script-src 'self' with no unsafe-inline", got)
+	}
+	if strings.Contains(got, "script-src 'self' 'unsafe-inline'") {
+		t.Errorf("CSP allows unsafe-inline scripts: %q", got)
+	}
+}
+
 func TestPollFailureIsReportedNotPanic(t *testing.T) {
 	// A dead address must come back as an error result, never a panic.
 	res := poll("127.0.0.1:1")

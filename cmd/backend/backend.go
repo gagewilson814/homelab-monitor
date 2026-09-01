@@ -39,6 +39,17 @@ var agentStore *agentstore.Store
 // read, so a malformed or hostile client can't force a huge allocation.
 const maxBodyBytes = 64 << 10
 
+// agentTokenHeader is the header poll() sends its shared secret in - the
+// name must match cmd/agent's homeHandler, which checks the same literal
+// string independently (the two binaries don't share a config package).
+const agentTokenHeader = "X-Homelab-Agent-Token"
+
+// agentToken is the shared secret sent with every poll, if any. Left
+// unset (the default), poll() sends no such header - identical to its
+// behavior before this existed, for anyone not opting in. Set it to the
+// same value as HOMELAB_AGENT_TOKEN on every agent that requires it.
+var agentToken = os.Getenv("HOMELAB_AGENT_TOKEN")
+
 // getAgentsFile reads HOMELAB_AGENTS_FILE, the JSON file that persists the
 // monitored agent list (address + tag) across restarts, defaulting to
 // data/agents.json under the working directory.
@@ -299,15 +310,24 @@ type AgentResponse struct {
 }
 
 // poll fetches a single agent's /stats endpoint and decodes it. Any of the
-// three failure modes (network, non-200 status, bad JSON) are reported via
-// Err rather than panicking, so one bad agent can't sink the whole fleet.
+// four failure modes (bad request construction, network, non-200 status,
+// bad JSON) are reported via Err rather than panicking, so one bad agent
+// can't sink the whole fleet.
 func poll(server string) AgentResponse {
 
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 	}
 
-	response, err := client.Get("http://" + server + "/stats")
+	req, err := http.NewRequest(http.MethodGet, "http://"+server+"/stats", nil)
+	if err != nil {
+		return AgentResponse{Address: server, Err: err.Error()}
+	}
+	if agentToken != "" {
+		req.Header.Set(agentTokenHeader, agentToken)
+	}
+
+	response, err := client.Do(req)
 	if err != nil {
 		return AgentResponse{Address: server, Err: err.Error()}
 	}
@@ -668,6 +688,11 @@ func main() {
 		log.Println("Discord alerts enabled, threshold:", getAlertThreshold(), "consecutive polls")
 	}
 	log.Printf("Usage thresholds: CPU %.0f%%, Memory %.0f%%, Disk %.0f%%", cpuThreshold, memThreshold, diskThreshold)
+	if agentToken != "" {
+		log.Println("Sending agent token with every poll (HOMELAB_AGENT_TOKEN set)")
+	} else {
+		log.Println("No agent token configured - polling agents unauthenticated (set HOMELAB_AGENT_TOKEN to require one)")
+	}
 
 	// Poll once synchronously so fleetCache isn't empty for the first
 	// request, then hand off to the background loop for the life of the
@@ -683,7 +708,7 @@ func main() {
 	// (and its memory) indefinitely.
 	srv := &http.Server{
 		Addr:              ":9090",
-		Handler:           mux,
+		Handler:           securityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -698,4 +723,33 @@ func serveFile(path string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, path)
 	}
+}
+
+// contentSecurityPolicy is applied to every response (login page, dashboard,
+// static assets, and the JSON API alike). script-src has no 'unsafe-inline'
+// and the app has no inline <script> or inline event-handler attributes
+// (web/register-sw.js and web/app.js are both external files, and all
+// interaction is wired up via addEventListener) - so this alone would have
+// blocked the inline-attribute XSS payload found in an earlier review, even
+// if the escaping fix had a hole. style-src needs 'unsafe-inline' because
+// metricRow() (web/app.js) sets an inline style="width:...%" on each
+// CPU/memory/disk bar; that's a plain CSS property, not executable, so it's
+// a much smaller concession than 'unsafe-inline' on script-src would be.
+const contentSecurityPolicy = "default-src 'self'; " +
+	"script-src 'self'; " +
+	"style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self'; " +
+	"connect-src 'self'; " +
+	"object-src 'none'; " +
+	"base-uri 'self'; " +
+	"form-action 'self'; " +
+	"frame-ancestors 'none'"
+
+// securityHeaders wraps next so every response - not just the ones that
+// happen to render agent-supplied data - carries the CSP above.
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
+		next.ServeHTTP(w, r)
+	})
 }
