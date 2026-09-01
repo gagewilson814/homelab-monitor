@@ -24,9 +24,6 @@ var serverAddresses = getServerAddresses(os.Getenv("HOMELAB_AGENTS"))
 
 // discordNotifier sends the up/down alerts. Its webhook URL is optional -
 // an empty DISCORD_WEBHOOK_URL just makes Send a no-op, so alerting is
-// silently disabled rather than requiring its own feature flag.
-// discordNotifier sends the up/down alerts. Its webhook URL is optional -
-// an empty DISCORD_WEBHOOK_URL just makes Send a no-op, so alerting is
 // silently disabled rather than requiring its own feature flag. Declared as
 // the Notifier interface (not the concrete *Discord) so tests can swap in a
 // recording double.
@@ -240,8 +237,6 @@ func checkAlerts(results []AgentResponse) {
 	}
 }
 
-// sendAlert sends a Discord message in its own goroutine, so a slow or
-// unreachable webhook never delays the polling loop.
 // sendAlert posts a human-readable up/down alert to Discord. It is
 // fire-and-forget: the notification is dispatched asynchronously and callers
 // get no signal about when (or whether) it completes, which is all the
