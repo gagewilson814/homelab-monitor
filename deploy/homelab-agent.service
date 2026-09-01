@@ -1,0 +1,19 @@
+[Unit]
+Description=Homelab Monitor Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/homelab-agent
+EnvironmentFile=-/etc/homelab-monitor/agent.env
+Restart=on-failure
+RestartSec=5
+User=homelab
+Group=homelab
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

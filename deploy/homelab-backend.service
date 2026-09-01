@@ -1,0 +1,20 @@
+[Unit]
+Description=Homelab Monitor Backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/homelab-monitor
+ExecStart=/opt/homelab-monitor/homelab-backend
+EnvironmentFile=/etc/homelab-monitor/backend.env
+Restart=on-failure
+RestartSec=5
+User=homelab
+Group=homelab
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
