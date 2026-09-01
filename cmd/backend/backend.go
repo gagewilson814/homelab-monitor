@@ -57,6 +57,42 @@ func lookupHostname(address string) string {
 	return hostnameCache[address]
 }
 
+// lastSeenCache remembers when each agent was last observed online, so an
+// offline card can show when it was last healthy instead of just "down".
+var (
+	lastSeenMu    sync.Mutex
+	lastSeenCache = make(map[string]time.Time)
+)
+
+func rememberLastSeen(address string, online bool) {
+	if !online {
+		return
+	}
+	lastSeenMu.Lock()
+	lastSeenCache[address] = time.Now()
+	lastSeenMu.Unlock()
+}
+
+func lookupLastSeen(address string) (time.Time, bool) {
+	lastSeenMu.Lock()
+	defer lastSeenMu.Unlock()
+	t, ok := lastSeenCache[address]
+	return t, ok
+}
+
+// annotateLastSeen records this round's online agents into lastSeenCache,
+// then stamps every result (online or not) with the most recent time it was
+// seen online, so an offline card can still report when it was last healthy.
+func annotateLastSeen(results []AgentResponse) {
+	for i := range results {
+		online := results[i].Err == ""
+		rememberLastSeen(results[i].Address, online)
+		if t, ok := lookupLastSeen(results[i].Address); ok {
+			results[i].LastSeen = &t
+		}
+	}
+}
+
 // getAlertThreshold reads DISCORD_ALERT_THRESHOLD, defaulting to 2
 // consecutive polls (see getPollInterval for how often that is).
 func getAlertThreshold() int {
@@ -66,6 +102,25 @@ func getAlertThreshold() int {
 		}
 	}
 	return 2
+}
+
+// cpuThreshold, memThreshold, and diskThreshold are the sustained-usage
+// percentages that trigger a threshold alert (see checkMetricThreshold).
+var (
+	cpuThreshold  = getMetricThreshold("HOMELAB_CPU_THRESHOLD", 90)
+	memThreshold  = getMetricThreshold("HOMELAB_MEM_THRESHOLD", 90)
+	diskThreshold = getMetricThreshold("HOMELAB_DISK_THRESHOLD", 90)
+)
+
+// getMetricThreshold reads a percentage threshold from the given env var,
+// falling back to def if it's unset or not a positive number.
+func getMetricThreshold(env string, def float64) float64 {
+	if v := os.Getenv(env); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			return f
+		}
+	}
+	return def
 }
 
 // getPollInterval reads HOMELAB_POLL_INTERVAL (seconds), defaulting to 5.
@@ -101,9 +156,10 @@ func getServerAddresses(env string) []string {
 // while Err carries the failure reason so the dashboard can still render
 // the card (marked offline) even when an agent is unreachable.
 type AgentResponse struct {
-	Address string          `json:"address"`
-	Data    *stats.Response `json:"data,omitempty"`
-	Err     string          `json:"error,omitempty"`
+	Address  string          `json:"address"`
+	Data     *stats.Response `json:"data,omitempty"`
+	Err      string          `json:"error,omitempty"`
+	LastSeen *time.Time      `json:"last_seen,omitempty"`
 }
 
 // poll fetches a single agent's /stats endpoint and decodes it. Any of the
@@ -169,6 +225,7 @@ var (
 func pollLoop(interval time.Duration) {
 	for {
 		results := pollAll(serverAddresses)
+		annotateLastSeen(results)
 		checkAlerts(results)
 
 		fleetCacheMu.Lock()
@@ -234,6 +291,29 @@ func checkAlerts(results []AgentResponse) {
 				sendAlert(fmt.Sprintf(":warning: %s on %s went offline", svc.Name, name))
 			}
 		}
+
+		checkMetricThreshold(result.Address, "CPU", result.Data.CPUUsage, cpuThreshold, name)
+		checkMetricThreshold(result.Address, "Memory", result.Data.MemoryUsage, memThreshold, name)
+		checkMetricThreshold(result.Address, "Disk", result.Data.DiskUsage, diskThreshold, name)
+	}
+}
+
+// checkMetricThreshold debounces one usage metric (CPU/Memory/Disk) through
+// the same Tracker used for online/offline state, keyed per-address-and-
+// metric so a sustained breach fires once and a sustained recovery fires
+// once, instead of alerting on every poll while a host is under load.
+func checkMetricThreshold(address, label string, value, threshold float64, name string) {
+	key := address + "/" + strings.ToLower(label)
+	healthy := value < threshold
+	transition := alertTracker.Observe(key, healthy)
+	if transition == "" {
+		return
+	}
+
+	if transition == "online" {
+		sendAlert(fmt.Sprintf(":white_check_mark: %s usage on %s back to normal: %.1f%%", label, name, value))
+	} else {
+		sendAlert(fmt.Sprintf(":rotating_light: %s usage on %s is high: %.1f%% (threshold %.0f%%)", label, name, value, threshold))
 	}
 }
 
@@ -277,11 +357,13 @@ func main() {
 	} else {
 		log.Println("Discord alerts enabled, threshold:", getAlertThreshold(), "consecutive polls")
 	}
+	log.Printf("Usage thresholds: CPU %.0f%%, Memory %.0f%%, Disk %.0f%%", cpuThreshold, memThreshold, diskThreshold)
 
 	// Poll once synchronously so fleetCache isn't empty for the first
 	// request, then hand off to the background loop for the life of the
 	// process.
 	fleetCache = pollAll(serverAddresses)
+	annotateLastSeen(fleetCache)
 	checkAlerts(fleetCache)
 	go pollLoop(pollInterval)
 

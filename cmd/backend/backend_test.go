@@ -257,6 +257,61 @@ func TestCheckAlertsOnlineTransition(t *testing.T) {
 	}
 }
 
+func TestCheckAlertsThresholdBreachAndRecovery(t *testing.T) {
+	fa := newFakeAgent(t, "node1")
+	installTestState(t, fa)
+
+	origCPU := cpuThreshold
+	cpuThreshold = 80
+	defer func() { cpuThreshold = origCPU }()
+
+	alerts := withRecordingNotifier(t, func() {
+		alertTracker = alert.NewTracker(1)
+		addr := fa.address()
+
+		// Baseline healthy, then a breach: alert fires once on the breach.
+		checkAlerts([]AgentResponse{{Address: addr, Data: &stats.Response{Hostname: "node1", CPUUsage: 10}}})
+		checkAlerts([]AgentResponse{{Address: addr, Data: &stats.Response{Hostname: "node1", CPUUsage: 95}}})
+		// Steady breach: no repeat.
+		checkAlerts([]AgentResponse{{Address: addr, Data: &stats.Response{Hostname: "node1", CPUUsage: 96}}})
+		// Recovery: alert fires once more.
+		checkAlerts([]AgentResponse{{Address: addr, Data: &stats.Response{Hostname: "node1", CPUUsage: 5}}})
+	})
+
+	if len(alerts) != 2 {
+		t.Fatalf("expected a breach alert and a recovery alert, got %v", alerts)
+	}
+	// sendAlert fires each alert from its own goroutine, so the two messages
+	// can land in either order - assert on content, not position.
+	joined := strings.Join(alerts, " | ")
+	if !strings.Contains(joined, "CPU") || !strings.Contains(joined, "high") {
+		t.Errorf("expected a high-CPU breach alert, got %v", alerts)
+	}
+	if !strings.Contains(joined, "normal") {
+		t.Errorf("expected a recovery-to-normal alert, got %v", alerts)
+	}
+}
+
+func TestAnnotateLastSeenPersistsThroughOutage(t *testing.T) {
+	addr := "last-seen-test:1"
+	lastSeenMu.Lock()
+	delete(lastSeenCache, addr)
+	lastSeenMu.Unlock()
+
+	online := []AgentResponse{{Address: addr, Data: &stats.Response{Hostname: "n"}}}
+	annotateLastSeen(online)
+	if online[0].LastSeen == nil {
+		t.Fatal("expected LastSeen to be set for an online result")
+	}
+	seenAt := *online[0].LastSeen
+
+	offline := []AgentResponse{{Address: addr, Err: "connection refused"}}
+	annotateLastSeen(offline)
+	if offline[0].LastSeen == nil || !offline[0].LastSeen.Equal(seenAt) {
+		t.Fatalf("expected the offline result to retain the last-online timestamp, got %v want %v", offline[0].LastSeen, seenAt)
+	}
+}
+
 func TestFleetHandlerServesCache(t *testing.T) {
 	fa := newFakeAgent(t, "node1")
 	installTestState(t, fa)

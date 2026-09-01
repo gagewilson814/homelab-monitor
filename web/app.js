@@ -19,6 +19,18 @@ function formatUptime(seconds) {
   return parts.join(" ");
 }
 
+// Format an ISO timestamp as a short relative string like "just now",
+// "5m ago", "3h ago", falling back to whole days beyond that.
+function formatLastSeen(iso) {
+  const seconds = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (seconds < 60) return "just now";
+  const m = Math.floor(seconds / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
 // Map a percentage to a CSS class that colors its bar: green default,
 // yellow from 70%, red from 90%.
 function barClass(pct) {
@@ -50,11 +62,16 @@ function serviceRow(svc) {
 // "offline" styling and show the failure reason; healthy agents render
 // their hostname and metric rows.
 function renderCard(agent) {
+  const lastSeenRow = agent.last_seen
+    ? `<div class="metric"><span>Last seen</span><span>${formatLastSeen(agent.last_seen)}</span></div>`
+    : "";
+
   if (agent.error) {
     return `
       <div class="card offline">
         <h2><span class="dot"></span>${agent.address}</h2>
         <div class="error-text">${agent.error}</div>
+        ${lastSeenRow}
       </div>`;
   }
 
@@ -68,6 +85,7 @@ function renderCard(agent) {
       ${metricRow("Disk", d.disk_usage)}
       <div class="metric"><span>Uptime</span><span>${formatUptime(d.uptime)}</span></div>
       <div class="metric"><span>Address</span><span>${agent.address}</span></div>
+      ${lastSeenRow}
       ${services}
     </div>`;
 }
