@@ -1,14 +1,18 @@
-/* Dashboard theme. Dark palette plus three semantic accent colors used
-   throughout: --ok (healthy), --warn (70%+), and --bad (90%+) which also
-   marks offline agents. */
+/* Blue-on-black dashboard theme. --accent drives chrome (buttons, borders,
+   header). The three semantic colors stay separate from the theme so status
+   still reads at a glance: --ok (healthy), --warn (70%+), and --bad (90%+,
+   also marks offline agents). */
 
 :root {
   color-scheme: dark;
-  --bg: #0f1115;
-  --card: #1a1d24;
-  --border: #2a2e37;
-  --text: #e6e9ef;
-  --muted: #8b91a0;
+  --bg: #05070c;
+  --panel: #0a0e18;
+  --card: #0e1420;
+  --border: #1c2536;
+  --text: #e7ecf7;
+  --muted: #7c8aa3;
+  --accent: #3b82f6;
+  --accent-hover: #5b9dff;
   --ok: #3ddc84;
   --warn: #f5c542;
   --bad: #f2545b;
@@ -28,10 +32,12 @@ header {
   align-items: center;
   justify-content: space-between;
   padding: 1.25rem 1.5rem;
+  background: var(--panel);
   border-bottom: 1px solid var(--border);
+  box-shadow: 0 1px 0 0 rgba(59, 130, 246, 0.15);
 }
 
-h1 { font-size: 1.25rem; margin: 0; }
+h1 { font-size: 1.25rem; margin: 0; letter-spacing: 0.01em; }
 
 .status { color: var(--muted); font-size: 0.85rem; }
 .status.live { color: var(--ok); }
@@ -53,7 +59,7 @@ h1 { font-size: 1.25rem; margin: 0; }
   cursor: pointer;
 }
 
-.logout-btn:hover { color: var(--text); border-color: var(--muted); }
+.logout-btn:hover { color: var(--text); border-color: var(--accent); }
 
 .login-body {
   display: flex;
@@ -88,15 +94,22 @@ h1 { font-size: 1.25rem; margin: 0; }
   font-size: 0.9rem;
 }
 
+.login-card input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .login-card button {
-  background: var(--ok);
-  color: #0f1115;
+  background: var(--accent);
+  color: #05070c;
   border: none;
   border-radius: 6px;
   padding: 0.5rem;
   font-weight: 600;
   cursor: pointer;
 }
+
+.login-card button:hover { background: var(--accent-hover); }
 
 .fleet {
   display: grid;
@@ -108,9 +121,12 @@ h1 { font-size: 1.25rem; margin: 0; }
 .card {
   background: var(--card);
   border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
   border-radius: 10px;
   padding: 1rem 1.25rem;
 }
+
+.card.offline { border-left-color: var(--bad); }
 
 .card h2 {
   margin: 0 0 0.75rem;
@@ -143,7 +159,7 @@ h1 { font-size: 1.25rem; margin: 0; }
 .metric .bar {
   flex: 1;
   height: 6px;
-  background: #262a33;
+  background: var(--border);
   border-radius: 4px;
   margin: 0 0.6rem;
   overflow: hidden;

@@ -7,11 +7,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"homeserver-monitor/internal/alert"
 	"homeserver-monitor/internal/auth"
+	"homeserver-monitor/internal/notify"
 	"homeserver-monitor/internal/stats"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +24,50 @@ import (
 // once at startup from the environment so the HTTP handlers can read it
 // without any shared mutable state.
 var serverAddresses = getServerAddresses()
+
+// discordNotifier sends the up/down alerts. Its webhook URL is optional -
+// an empty DISCORD_WEBHOOK_URL just makes Send a no-op, so alerting is
+// silently disabled rather than requiring its own feature flag.
+var discordNotifier = notify.NewDiscord(os.Getenv("DISCORD_WEBHOOK_URL"))
+
+// alertTracker debounces poll results so a single dropped poll doesn't fire
+// a notification; see getAlertThreshold for how many consecutive results in
+// the same direction it takes to confirm a transition.
+var alertTracker = alert.NewTracker(getAlertThreshold())
+
+// hostnameCache remembers the last hostname seen for each agent address, so
+// an offline alert (which by definition has no fresh stats.Response to read
+// a hostname from) can still name the machine instead of just its address.
+var (
+	hostnameMu    sync.Mutex
+	hostnameCache = make(map[string]string)
+)
+
+func rememberHostname(address string, data *stats.Response) {
+	if data == nil {
+		return
+	}
+	hostnameMu.Lock()
+	hostnameCache[address] = data.Hostname
+	hostnameMu.Unlock()
+}
+
+func lookupHostname(address string) string {
+	hostnameMu.Lock()
+	defer hostnameMu.Unlock()
+	return hostnameCache[address]
+}
+
+// getAlertThreshold reads DISCORD_ALERT_THRESHOLD, defaulting to 2
+// consecutive polls (about 10s at the dashboard's 5s refresh interval).
+func getAlertThreshold() int {
+	if env := os.Getenv("DISCORD_ALERT_THRESHOLD"); env != "" {
+		if n, err := strconv.Atoi(env); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 2
+}
 
 // getServerAddresses parses the comma-separated HOMELAB_AGENTS env var into
 // a clean, whitespace-trimmed list, skipping any empty entries. It falls
@@ -103,8 +150,42 @@ func pollAll(servers []string) []AgentResponse {
 func fleetHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	results := pollAll(serverAddresses)
+	checkAlerts(results)
 	if err := json.NewEncoder(w).Encode(results); err != nil {
 		log.Println("Error encoding JSON response: ", err)
+	}
+}
+
+// checkAlerts feeds each poll result through the debounce tracker and fires
+// a Discord notification for any agent that just crossed the threshold into
+// a newly confirmed online/offline state. Sends run in their own goroutine
+// so a slow or unreachable Discord webhook never delays the dashboard poll.
+func checkAlerts(results []AgentResponse) {
+	for _, result := range results {
+		rememberHostname(result.Address, result.Data)
+
+		transition := alertTracker.Observe(result.Address, result.Err == "")
+		if transition == "" {
+			continue
+		}
+
+		name := result.Address
+		if hostname := lookupHostname(result.Address); hostname != "" {
+			name = fmt.Sprintf("%s (%s)", hostname, result.Address)
+		}
+
+		var message string
+		if transition == "online" {
+			message = fmt.Sprintf(":white_check_mark: %s is back online", name)
+		} else {
+			message = fmt.Sprintf(":rotating_light: %s went offline: %s", name, result.Err)
+		}
+
+		go func(msg string) {
+			if err := discordNotifier.Send(msg); err != nil {
+				log.Println("Error sending Discord notification: ", err)
+			}
+		}(message)
 	}
 }
 
@@ -131,6 +212,11 @@ func main() {
 	mux.Handle("/", authStore.RequirePage(http.FileServer(http.Dir("web"))))
 
 	log.Println("Polling agents:", serverAddresses)
+	if os.Getenv("DISCORD_WEBHOOK_URL") == "" {
+		log.Println("Discord alerts disabled (DISCORD_WEBHOOK_URL not set)")
+	} else {
+		log.Println("Discord alerts enabled, threshold:", getAlertThreshold(), "consecutive polls")
+	}
 	log.Println("Backend starting on :9090")
 	log.Fatal(http.ListenAndServe(":9090", mux))
 }

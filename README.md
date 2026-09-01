@@ -86,6 +86,16 @@ Sessions are cookie-based, last 24h, and are held in memory (a backend restart l
 
 Aggregated JSON is also available directly at `http://localhost:9090/api/fleet` (requires the same session cookie).
 
+### Discord alerts (optional)
+
+Set `DISCORD_WEBHOOK_URL` to get a Discord message whenever an agent's online/offline state changes (e.g. a server dropping off the network). Alerts are debounced — an agent has to return the same result for `DISCORD_ALERT_THRESHOLD` consecutive polls (default `2`, so ~10s at the dashboard's 5s refresh interval) before a transition is confirmed, so a single dropped poll won't page you. Leave `DISCORD_WEBHOOK_URL` unset to disable alerting entirely.
+
+```bash
+HOMELAB_PASSWORD_HASH='$2a$10$...' \
+DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...' \
+go run ./cmd/backend
+```
+
 ## Roadmap
 
 - [x] Walking-skeleton HTTP server with `/stats` endpoint
@@ -95,9 +105,14 @@ Aggregated JSON is also available directly at `http://localhost:9090/api/fleet` 
 - [x] Backend service that polls Agents across the home network (concurrent, via goroutines)
 - [x] Minimal read-only web dashboard (no SQL yet)
 - [x] Single-user session-cookie authentication for the dashboard/API (non-negotiable before restart ships)
+- [x] Discord alerts on agent online/offline transitions (debounced)
 - [ ] Remote restart capability
 - [ ] SQL-backed dashboard with user login
 - [ ] Mobile-friendly / installable (PWA) dashboard access
+- [ ] Service-level checks (e.g. is Jellyfin's port actually answering, not just the host)
+- [ ] Threshold alerts (sustained high CPU/mem, disk nearing full)
+- [ ] "Last seen" timestamp per agent on the dashboard
+- [ ] Agents run as a system service (systemd/Windows service) so they survive a reboot unattended
 
 ## License
 
