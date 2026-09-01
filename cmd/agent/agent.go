@@ -18,8 +18,6 @@ import (
 	"github.com/shirou/gopsutil/v4/mem"
 )
 
-// getHostname returns the machine's name, falling back to "unknown" if the
-// OS refuses to report one.
 func getHostname() string {
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -29,7 +27,6 @@ func getHostname() string {
 	return hostname
 }
 
-// getDiskUsage reports the percentage of the root filesystem that is used.
 func getDiskUsage() float64 {
 	diskUsage, err := disk.Usage("/")
 	if err != nil {
@@ -39,7 +36,6 @@ func getDiskUsage() float64 {
 	return diskUsage.UsedPercent
 }
 
-// getMemoryUsage reports the percentage of physical RAM that is in use.
 func getMemoryUsage() float64 {
 	memory, err := mem.VirtualMemory()
 	if err != nil {
@@ -49,7 +45,6 @@ func getMemoryUsage() float64 {
 	return memory.UsedPercent
 }
 
-// getUptime returns the number of seconds the machine has been running.
 func getUptime() uint64 {
 	uptimeSeconds, err := host.Uptime()
 	if err != nil {

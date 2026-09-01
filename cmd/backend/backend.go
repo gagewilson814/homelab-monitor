@@ -20,9 +20,6 @@ import (
 	"time"
 )
 
-// serverAddresses is the list of agent endpoints to poll. It is resolved
-// once at startup from the environment so the HTTP handlers can read it
-// without any shared mutable state.
 var serverAddresses = getServerAddresses()
 
 // discordNotifier sends the up/down alerts. Its webhook URL is optional -
@@ -69,10 +66,6 @@ func getAlertThreshold() int {
 	return 2
 }
 
-// getServerAddresses parses the comma-separated HOMELAB_AGENTS env var into
-// a clean, whitespace-trimmed list, skipping any empty entries. It falls
-// back to localhost:8080 and localhost:8081 so the backend runs even with
-// no agents configured.
 func getServerAddresses() []string {
 	if env := os.Getenv("HOMELAB_AGENTS"); env != "" {
 		var addresses []string
@@ -208,7 +201,6 @@ func main() {
 	mux.HandleFunc("/login.js", serveFile("web/login.js"))
 	mux.HandleFunc("/style.css", serveFile("web/style.css"))
 
-	// Serve the dashboard from ./web for any request not matched above.
 	mux.Handle("/", authStore.RequirePage(http.FileServer(http.Dir("web"))))
 
 	log.Println("Polling agents:", serverAddresses)
