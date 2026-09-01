@@ -2,6 +2,32 @@ package alert
 
 import "testing"
 
+func TestTrackerConfirmed(t *testing.T) {
+	tr := NewTracker(1)
+
+	if _, _, ok := tr.Confirmed("agent1"); ok {
+		t.Fatal("Confirmed on an unobserved address should report ok=false")
+	}
+
+	tr.Observe("agent1", true)
+	online, since1, ok := tr.Confirmed("agent1")
+	if !ok || !online {
+		t.Fatalf("Confirmed after baseline sighting = (%v, %v), want (true, true)", online, ok)
+	}
+	if since1.IsZero() {
+		t.Fatal("Confirmed should report a non-zero since time")
+	}
+
+	tr.Observe("agent1", false)
+	online, since2, ok := tr.Confirmed("agent1")
+	if !ok || online {
+		t.Fatalf("Confirmed after offline transition = (%v, %v), want (false, true)", online, ok)
+	}
+	if !since2.After(since1) {
+		t.Fatalf("since should advance on a new confirmed transition: %v -> %v", since1, since2)
+	}
+}
+
 func TestTracker(t *testing.T) {
 	tr := NewTracker(2)
 

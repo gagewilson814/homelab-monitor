@@ -14,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -93,6 +94,75 @@ func annotateLastSeen(results []AgentResponse) {
 	}
 }
 
+// maxHistoryPoints caps how many samples of a metric are kept per agent -
+// enough for a several-minute sparkline without the cache growing forever.
+const maxHistoryPoints = 60
+
+// MetricHistory is a short ring buffer of recent CPU/memory/disk samples for
+// one agent, oldest first, used to render a trend sparkline on the
+// dashboard. It's kept as a separate cache (not stats.Response) because it's
+// aggregation state the backend owns, not something an Agent reports.
+type MetricHistory struct {
+	CPU  []float64 `json:"cpu"`
+	Mem  []float64 `json:"mem"`
+	Disk []float64 `json:"disk"`
+}
+
+// historyCache holds one MetricHistory per agent address, appended to on
+// every successful poll.
+var (
+	historyMu    sync.Mutex
+	historyCache = make(map[string]*MetricHistory)
+)
+
+// recordHistory appends this poll's metrics (if data was collected) into the
+// agent's history ring buffer and returns a snapshot copy of it. Offline
+// polls (data == nil) still return the existing history unchanged, so an
+// offline card keeps showing the trend leading up to the outage instead of
+// losing it.
+func recordHistory(address string, data *stats.Response) *MetricHistory {
+	historyMu.Lock()
+	defer historyMu.Unlock()
+
+	h, ok := historyCache[address]
+	if !ok {
+		h = &MetricHistory{}
+		historyCache[address] = h
+	}
+	if data != nil {
+		h.CPU = appendCapped(h.CPU, data.CPUUsage)
+		h.Mem = appendCapped(h.Mem, data.MemoryUsage)
+		h.Disk = appendCapped(h.Disk, data.DiskUsage)
+	}
+
+	return &MetricHistory{
+		CPU:  append([]float64(nil), h.CPU...),
+		Mem:  append([]float64(nil), h.Mem...),
+		Disk: append([]float64(nil), h.Disk...),
+	}
+}
+
+// appendCapped appends v to s, dropping from the front once s exceeds
+// maxHistoryPoints so the buffer stays a fixed-size sliding window.
+func appendCapped(s []float64, v float64) []float64 {
+	s = append(s, v)
+	if len(s) > maxHistoryPoints {
+		s = s[len(s)-maxHistoryPoints:]
+	}
+	return s
+}
+
+// annotateHistory stamps every result with its updated metric history. Must
+// run after rememberHostname/annotateLastSeen-style bookkeeping is otherwise
+// unrelated to poll ordering, but is kept as its own pass for the same
+// reason annotateLastSeen is: one clear responsibility per pass over
+// results.
+func annotateHistory(results []AgentResponse) {
+	for i := range results {
+		results[i].History = recordHistory(results[i].Address, results[i].Data)
+	}
+}
+
 // getAlertThreshold reads DISCORD_ALERT_THRESHOLD, defaulting to 2
 // consecutive polls (see getPollInterval for how often that is).
 func getAlertThreshold() int {
@@ -160,6 +230,7 @@ type AgentResponse struct {
 	Data     *stats.Response `json:"data,omitempty"`
 	Err      string          `json:"error,omitempty"`
 	LastSeen *time.Time      `json:"last_seen,omitempty"`
+	History  *MetricHistory  `json:"history,omitempty"`
 }
 
 // poll fetches a single agent's /stats endpoint and decodes it. Any of the
@@ -219,6 +290,36 @@ var (
 	fleetCache   []AgentResponse
 )
 
+// alertsCache holds the most recently computed set of currently-active
+// alerts (offline agents, down services, sustained threshold breaches).
+// Like fleetCache, it's written once per poll cycle by pollLoop and served
+// as-is by alertsHandler.
+var (
+	alertsCacheMu sync.RWMutex
+	alertsCache   []Alert
+)
+
+// AlertType categorizes an entry in the aggregated /api/alerts feed.
+type AlertType string
+
+const (
+	AlertOffline   AlertType = "offline"
+	AlertService   AlertType = "service"
+	AlertThreshold AlertType = "threshold"
+)
+
+// Alert is one currently-active problem the debounce tracker has confirmed:
+// an offline agent, a down service, or a sustained CPU/memory/disk
+// threshold breach. Unlike the Discord notifications checkAlerts also
+// fires, this list reflects present-tense state - an entry stays in it for
+// as long as the problem is ongoing, not just the poll where it started.
+type Alert struct {
+	Type    AlertType `json:"type"`
+	Target  string    `json:"target"`
+	Message string    `json:"message"`
+	Since   time.Time `json:"since"`
+}
+
 // pollLoop polls every agent and runs alert checks on a fixed interval,
 // forever. It's meant to run in its own goroutine for the life of the
 // process.
@@ -226,11 +327,16 @@ func pollLoop(interval time.Duration) {
 	for {
 		results := pollAll(serverAddresses)
 		annotateLastSeen(results)
-		checkAlerts(results)
+		annotateHistory(results)
+		alerts := checkAlerts(results)
 
 		fleetCacheMu.Lock()
 		fleetCache = results
 		fleetCacheMu.Unlock()
+
+		alertsCacheMu.Lock()
+		alertsCache = alerts
+		alertsCacheMu.Unlock()
 
 		time.Sleep(interval)
 	}
@@ -251,10 +357,31 @@ func fleetHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// checkAlerts feeds each poll result through the debounce tracker and fires
-// a Discord notification for any agent, or any service on that agent, that
-// just crossed the threshold into a newly confirmed online/offline state.
-func checkAlerts(results []AgentResponse) {
+// alertsHandler serves the latest cached alerts list as JSON, the same
+// cache-only pattern as fleetHandler.
+func alertsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	alertsCacheMu.RLock()
+	alerts := alertsCache
+	alertsCacheMu.RUnlock()
+
+	if alerts == nil {
+		alerts = []Alert{}
+	}
+	if err := json.NewEncoder(w).Encode(alerts); err != nil {
+		log.Println("Error encoding JSON response: ", err)
+	}
+}
+
+// checkAlerts feeds each poll result through the debounce tracker, firing a
+// Discord notification for any agent, service, or metric that just crossed
+// the threshold into a newly confirmed state, and returns every
+// currently-confirmed problem as an Alert for the dashboard's aggregated
+// alerts view.
+func checkAlerts(results []AgentResponse) []Alert {
+	var alerts []Alert
+
 	for _, result := range results {
 		rememberHostname(result.Address, result.Data)
 		name := result.Address
@@ -270,6 +397,14 @@ func checkAlerts(results []AgentResponse) {
 				sendAlert(fmt.Sprintf(":rotating_light: %s went offline: %s", name, result.Err))
 			}
 		}
+		if confirmedOnline, since, ok := alertTracker.Confirmed(result.Address); ok && !confirmedOnline {
+			alerts = append(alerts, Alert{
+				Type:    AlertOffline,
+				Target:  name,
+				Message: fmt.Sprintf("%s is offline: %s", name, result.Err),
+				Since:   since,
+			})
+		}
 
 		// A host that's currently unreachable has no fresh service data, and
 		// its services being unreachable is implied by the host alert above
@@ -281,40 +416,59 @@ func checkAlerts(results []AgentResponse) {
 		for _, svc := range result.Data.Services {
 			serviceKey := result.Address + "/" + svc.Name
 			transition := alertTracker.Observe(serviceKey, svc.Up)
-			if transition == "" {
-				continue
+			if transition != "" {
+				if transition == "online" {
+					sendAlert(fmt.Sprintf(":white_check_mark: %s on %s is back online", svc.Name, name))
+				} else {
+					sendAlert(fmt.Sprintf(":warning: %s on %s went offline", svc.Name, name))
+				}
 			}
-
-			if transition == "online" {
-				sendAlert(fmt.Sprintf(":white_check_mark: %s on %s is back online", svc.Name, name))
-			} else {
-				sendAlert(fmt.Sprintf(":warning: %s on %s went offline", svc.Name, name))
+			if confirmedOnline, since, ok := alertTracker.Confirmed(serviceKey); ok && !confirmedOnline {
+				alerts = append(alerts, Alert{
+					Type:    AlertService,
+					Target:  name,
+					Message: fmt.Sprintf("%s on %s is down", svc.Name, name),
+					Since:   since,
+				})
 			}
 		}
 
-		checkMetricThreshold(result.Address, "CPU", result.Data.CPUUsage, cpuThreshold, name)
-		checkMetricThreshold(result.Address, "Memory", result.Data.MemoryUsage, memThreshold, name)
-		checkMetricThreshold(result.Address, "Disk", result.Data.DiskUsage, diskThreshold, name)
+		alerts = append(alerts, checkMetricThreshold(result.Address, "CPU", result.Data.CPUUsage, cpuThreshold, name)...)
+		alerts = append(alerts, checkMetricThreshold(result.Address, "Memory", result.Data.MemoryUsage, memThreshold, name)...)
+		alerts = append(alerts, checkMetricThreshold(result.Address, "Disk", result.Data.DiskUsage, diskThreshold, name)...)
 	}
+
+	sort.Slice(alerts, func(i, j int) bool { return alerts[i].Since.After(alerts[j].Since) })
+	return alerts
 }
 
 // checkMetricThreshold debounces one usage metric (CPU/Memory/Disk) through
 // the same Tracker used for online/offline state, keyed per-address-and-
 // metric so a sustained breach fires once and a sustained recovery fires
-// once, instead of alerting on every poll while a host is under load.
-func checkMetricThreshold(address, label string, value, threshold float64, name string) {
+// once, instead of alerting on every poll while a host is under load. It
+// returns a single-element Alert slice while the breach is still confirmed,
+// or nil once it's healthy.
+func checkMetricThreshold(address, label string, value, threshold float64, name string) []Alert {
 	key := address + "/" + strings.ToLower(label)
 	healthy := value < threshold
 	transition := alertTracker.Observe(key, healthy)
-	if transition == "" {
-		return
+	if transition != "" {
+		if transition == "online" {
+			sendAlert(fmt.Sprintf(":white_check_mark: %s usage on %s back to normal: %.1f%%", label, name, value))
+		} else {
+			sendAlert(fmt.Sprintf(":rotating_light: %s usage on %s is high: %.1f%% (threshold %.0f%%)", label, name, value, threshold))
+		}
 	}
 
-	if transition == "online" {
-		sendAlert(fmt.Sprintf(":white_check_mark: %s usage on %s back to normal: %.1f%%", label, name, value))
-	} else {
-		sendAlert(fmt.Sprintf(":rotating_light: %s usage on %s is high: %.1f%% (threshold %.0f%%)", label, name, value, threshold))
+	if confirmedOnline, since, ok := alertTracker.Confirmed(key); ok && !confirmedOnline {
+		return []Alert{{
+			Type:    AlertThreshold,
+			Target:  name,
+			Message: fmt.Sprintf("%s usage on %s is high: %.1f%% (threshold %.0f%%)", label, name, value, threshold),
+			Since:   since,
+		}}
 	}
+	return nil
 }
 
 // sendAlert posts a human-readable up/down alert to Discord. It is
@@ -340,6 +494,7 @@ func main() {
 	mux.HandleFunc("/api/login", authStore.LoginHandler)
 	mux.HandleFunc("/api/logout", authStore.LogoutHandler)
 	mux.HandleFunc("/api/fleet", authStore.RequireAPI(fleetHandler))
+	mux.HandleFunc("/api/alerts", authStore.RequireAPI(alertsHandler))
 
 	// login.html/js/css must stay reachable without a session, or nobody
 	// could ever log in. Registered as exact paths so they win over the "/"
@@ -364,7 +519,8 @@ func main() {
 	// process.
 	fleetCache = pollAll(serverAddresses)
 	annotateLastSeen(fleetCache)
-	checkAlerts(fleetCache)
+	annotateHistory(fleetCache)
+	alertsCache = checkAlerts(fleetCache)
 	go pollLoop(pollInterval)
 
 	log.Println("Backend starting on :9090")

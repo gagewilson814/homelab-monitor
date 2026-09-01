@@ -127,6 +127,12 @@ func installTestState(t *testing.T, fa *fakeAgent) {
 	fleetCacheMu.Lock()
 	fleetCache = nil
 	fleetCacheMu.Unlock()
+	alertsCacheMu.Lock()
+	alertsCache = nil
+	alertsCacheMu.Unlock()
+	historyMu.Lock()
+	historyCache = make(map[string]*MetricHistory)
+	historyMu.Unlock()
 }
 
 func TestPollSuccess(t *testing.T) {
@@ -309,6 +315,138 @@ func TestAnnotateLastSeenPersistsThroughOutage(t *testing.T) {
 	annotateLastSeen(offline)
 	if offline[0].LastSeen == nil || !offline[0].LastSeen.Equal(seenAt) {
 		t.Fatalf("expected the offline result to retain the last-online timestamp, got %v want %v", offline[0].LastSeen, seenAt)
+	}
+}
+
+func TestAnnotateHistoryAppendsAndCaps(t *testing.T) {
+	addr := "history-test:1"
+	historyMu.Lock()
+	delete(historyCache, addr)
+	historyMu.Unlock()
+
+	for i := 0; i < maxHistoryPoints+5; i++ {
+		results := []AgentResponse{{Address: addr, Data: &stats.Response{CPUUsage: float64(i)}}}
+		annotateHistory(results)
+		if len(results[0].History.CPU) > maxHistoryPoints {
+			t.Fatalf("history grew past cap: len=%d", len(results[0].History.CPU))
+		}
+	}
+
+	results := []AgentResponse{{Address: addr, Data: &stats.Response{CPUUsage: 999}}}
+	annotateHistory(results)
+	got := results[0].History.CPU
+	if len(got) != maxHistoryPoints {
+		t.Fatalf("history len = %d, want %d", len(got), maxHistoryPoints)
+	}
+	if got[len(got)-1] != 999 {
+		t.Fatalf("newest sample = %v, want 999 as the last element", got[len(got)-1])
+	}
+}
+
+func TestAnnotateHistoryFreezesOnOffline(t *testing.T) {
+	addr := "history-offline-test:1"
+	historyMu.Lock()
+	delete(historyCache, addr)
+	historyMu.Unlock()
+
+	online := []AgentResponse{{Address: addr, Data: &stats.Response{CPUUsage: 42}}}
+	annotateHistory(online)
+
+	offline := []AgentResponse{{Address: addr, Err: "connection refused"}}
+	annotateHistory(offline)
+
+	if len(offline[0].History.CPU) != 1 || offline[0].History.CPU[0] != 42 {
+		t.Fatalf("offline poll should keep prior history unchanged, got %+v", offline[0].History)
+	}
+}
+
+func TestCheckAlertsReturnsActiveOfflineAlert(t *testing.T) {
+	fa := newFakeAgent(t, "node1")
+	installTestState(t, fa)
+
+	_ = withRecordingNotifier(t, func() {
+		alertTracker = alert.NewTracker(1)
+		addr := fa.address()
+
+		checkAlerts([]AgentResponse{{Address: addr, Data: &stats.Response{Hostname: "node1"}}})
+		alerts := checkAlerts([]AgentResponse{{Address: addr, Err: "connection refused"}})
+
+		if len(alerts) != 1 {
+			t.Fatalf("expected exactly one active alert, got %v", alerts)
+		}
+		if alerts[0].Type != AlertOffline {
+			t.Errorf("alert type = %q, want %q", alerts[0].Type, AlertOffline)
+		}
+		if alerts[0].Since.IsZero() {
+			t.Error("alert Since should be set")
+		}
+
+		// The alert should keep appearing while the outage is ongoing, not
+		// just on the poll where it started.
+		steady := checkAlerts([]AgentResponse{{Address: addr, Err: "connection refused"}})
+		if len(steady) != 1 {
+			t.Fatalf("expected the offline alert to persist across polls, got %v", steady)
+		}
+	})
+}
+
+func TestCheckAlertsThresholdAlertClearsOnRecovery(t *testing.T) {
+	fa := newFakeAgent(t, "node1")
+	installTestState(t, fa)
+
+	origCPU := cpuThreshold
+	cpuThreshold = 80
+	defer func() { cpuThreshold = origCPU }()
+
+	_ = withRecordingNotifier(t, func() {
+		alertTracker = alert.NewTracker(1)
+		addr := fa.address()
+
+		checkAlerts([]AgentResponse{{Address: addr, Data: &stats.Response{Hostname: "node1", CPUUsage: 10}}})
+		breach := checkAlerts([]AgentResponse{{Address: addr, Data: &stats.Response{Hostname: "node1", CPUUsage: 95}}})
+		if len(breach) != 1 || breach[0].Type != AlertThreshold {
+			t.Fatalf("expected one threshold alert, got %v", breach)
+		}
+
+		recovered := checkAlerts([]AgentResponse{{Address: addr, Data: &stats.Response{Hostname: "node1", CPUUsage: 5}}})
+		if len(recovered) != 0 {
+			t.Fatalf("expected no active alerts after recovery, got %v", recovered)
+		}
+	})
+}
+
+func TestAlertsHandlerServesCache(t *testing.T) {
+	fa := newFakeAgent(t, "node1")
+	installTestState(t, fa)
+
+	want := []Alert{{Type: AlertOffline, Target: "node1", Message: "node1 is offline", Since: time.Now()}}
+	alertsCacheMu.Lock()
+	alertsCache = want
+	alertsCacheMu.Unlock()
+
+	rr := httptest.NewRecorder()
+	alertsHandler(rr, httptest.NewRequest(http.MethodGet, "/api/alerts", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("alerts handler code = %d, want 200", rr.Code)
+	}
+	var got []Alert
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode alerts: %v", err)
+	}
+	if len(got) != 1 || got[0].Type != AlertOffline || got[0].Target != "node1" {
+		t.Fatalf("alerts handler returned %+v", got)
+	}
+}
+
+func TestAlertsHandlerServesEmptyArrayNotNull(t *testing.T) {
+	alertsCacheMu.Lock()
+	alertsCache = nil
+	alertsCacheMu.Unlock()
+
+	rr := httptest.NewRecorder()
+	alertsHandler(rr, httptest.NewRequest(http.MethodGet, "/api/alerts", nil))
+	if got := strings.TrimSpace(rr.Body.String()); got != "[]" {
+		t.Fatalf("empty alerts body = %q, want []", got)
 	}
 }
 

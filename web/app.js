@@ -5,6 +5,15 @@ const POLL_INTERVAL_MS = 5000;
 // DOM anchors used by the render/update loop.
 const fleetEl = document.getElementById("fleet");
 const statusEl = document.getElementById("status");
+const errorBannerEl = document.getElementById("error-banner");
+const alertsListEl = document.getElementById("alerts-list");
+const alertsEmptyEl = document.getElementById("alerts-empty");
+const navAlertBadge = document.getElementById("nav-alert-badge");
+
+// Last successfully-fetched fleet, kept on screen through a failed poll so
+// the dashboard never blanks out and reads as a crash.
+let lastGoodAgents = null;
+let hasLoadedOnce = false;
 
 // Format a raw second count as a human string like "3d 5h 12m", dropping
 // the empty higher-order units (so 90 minutes won't print "0d 1h 30m").
@@ -39,12 +48,38 @@ function barClass(pct) {
   return "";
 }
 
-// Build one metric row (label + colored bar + value) for a card.
-function metricRow(label, pct) {
+// Build a small inline SVG trend line from a metric's recent history.
+// Falls back to nothing (caller renders a plain bar instead) until at
+// least two samples exist.
+function sparkline(values, pct) {
+  if (!values || values.length < 2) return "";
+  const w = 100;
+  const h = 22;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const points = values
+    .map((v, i) => {
+      const x = (i / (values.length - 1)) * w;
+      const y = h - ((v - min) / range) * h;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  const cls = barClass(pct);
+  return `<svg class="spark ${cls}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true"><polyline points="${points}" /></svg>`;
+}
+
+// Build one metric row (label + sparkline/bar + value) for a card. Renders
+// a sparkline once history exists, otherwise falls back to the flat bar so
+// the first couple of polls still show something.
+function metricRow(label, pct, history) {
+  const cls = barClass(pct);
+  const trend = sparkline(history, pct);
+  const track = trend || `<span class="bar"><i class="${cls}" style="width:${pct}%"></i></span>`;
   return `
     <div class="metric">
       <span>${label}</span>
-      <span class="bar"><i class="${barClass(pct)}" style="width:${pct}%"></i></span>
+      ${track}
       <span>${pct.toFixed(1)}%</span>
     </div>`;
 }
@@ -69,20 +104,21 @@ function renderCard(agent) {
   if (agent.error) {
     return `
       <div class="card offline">
-        <h2><span class="dot"></span>${agent.address}</h2>
+        <h2><span class="dot pulse"></span>${agent.address}<span class="state-label">offline</span></h2>
         <div class="error-text">${agent.error}</div>
         ${lastSeenRow}
       </div>`;
   }
 
   const d = agent.data;
+  const h = agent.history || {};
   const services = (d.services || []).map(serviceRow).join("");
   return `
     <div class="card">
-      <h2><span class="dot"></span>${d.hostname}</h2>
-      ${metricRow("CPU", d.cpu_usage)}
-      ${metricRow("Memory", d.memory_usage)}
-      ${metricRow("Disk", d.disk_usage)}
+      <h2><span class="dot"></span>${d.hostname}<span class="state-label">online</span></h2>
+      ${metricRow("CPU", d.cpu_usage, h.cpu)}
+      ${metricRow("Memory", d.memory_usage, h.mem)}
+      ${metricRow("Disk", d.disk_usage, h.disk)}
       <div class="metric"><span>Uptime</span><span>${formatUptime(d.uptime)}</span></div>
       <div class="metric"><span>Address</span><span>${agent.address}</span></div>
       ${lastSeenRow}
@@ -90,32 +126,230 @@ function renderCard(agent) {
     </div>`;
 }
 
+// Loading skeleton shown only before the first successful poll lands, so
+// the dashboard doesn't sit on a blank grid for the first ~5s.
+function renderSkeleton() {
+  const card = `
+    <div class="card skeleton" aria-hidden="true">
+      <h2><span class="skeleton-chip" style="width:60%"></span></h2>
+      <div class="skeleton-line"></div>
+      <div class="skeleton-line"></div>
+      <div class="skeleton-line"></div>
+      <div class="skeleton-line" style="width:40%"></div>
+    </div>`;
+  fleetEl.innerHTML = card.repeat(4);
+}
+
+// Shown in place of the skeleton if the very first poll fails - there's no
+// last-known fleet to fall back to yet, so a bare retry banner over a blank
+// grid would read as broken rather than loading.
+function renderFirstLoadError() {
+  fleetEl.innerHTML = `
+    <div class="empty-state">
+      <p>Can't reach the backend</p>
+      <p class="muted">Retrying automatically…</p>
+    </div>`;
+}
+
+function renderEmpty() {
+  fleetEl.innerHTML = `
+    <div class="empty-state">
+      <p>No agents yet</p>
+      <p class="muted">Set HOMELAB_AGENTS on the backend to start monitoring hosts.</p>
+    </div>`;
+}
+
+function showErrorBanner(message) {
+  errorBannerEl.querySelector(".error-banner-text").textContent = message;
+  errorBannerEl.hidden = false;
+}
+
+function hideErrorBanner() {
+  errorBannerEl.hidden = true;
+}
+
+// Alert type -> short icon glyph, kept alongside the text label so status
+// never depends on color alone.
+const ALERT_ICON = {
+  offline: "●",
+  service: "⚠",
+  threshold: "▲",
+};
+
+function formatSince(iso) {
+  return formatLastSeen(iso);
+}
+
+function renderAlert(alert) {
+  const icon = ALERT_ICON[alert.type] || "•";
+  return `
+    <li class="alert-item alert-${alert.type}">
+      <span class="alert-icon">${icon}</span>
+      <span class="alert-body">
+        <span class="alert-message">${alert.message}</span>
+        <span class="alert-since">since ${formatSince(alert.since)}</span>
+      </span>
+    </li>`;
+}
+
+function renderAlerts(alerts) {
+  navAlertBadge.textContent = String(alerts.length);
+  navAlertBadge.hidden = alerts.length === 0;
+
+  if (alerts.length === 0) {
+    alertsListEl.innerHTML = "";
+    alertsEmptyEl.hidden = false;
+    return;
+  }
+  alertsEmptyEl.hidden = true;
+  alertsListEl.innerHTML = alerts.map(renderAlert).join("");
+}
+
 // Fetch the aggregated fleet, re-render every card, and flip the status
 // pill to live/error. Errors are caught so a failed poll doesn't crash the
-// page — it just shows the error state until the next successful poll.
+// page - the last-known fleet stays on screen with a retry banner instead.
 async function refresh() {
+  if (!hasLoadedOnce) renderSkeleton();
+
   try {
-    const res = await fetch("/api/fleet");
-    if (res.status === 401) {
+    const [fleetRes, alertsRes] = await Promise.all([fetch("/api/fleet"), fetch("/api/alerts")]);
+
+    if (fleetRes.status === 401 || alertsRes.status === 401) {
       window.location.href = "/login.html";
       return;
     }
-    if (!res.ok) throw new Error(`backend returned ${res.status}`);
-    const agents = await res.json();
+    if (!fleetRes.ok) throw new Error(`backend returned ${fleetRes.status}`);
+    if (!alertsRes.ok) throw new Error(`backend returned ${alertsRes.status}`);
 
-    fleetEl.innerHTML = agents.map(renderCard).join("");
+    const agents = await fleetRes.json();
+    const alerts = await alertsRes.json();
+
+    lastGoodAgents = agents;
+    hasLoadedOnce = true;
+    hideErrorBanner();
+
+    if (agents.length === 0) {
+      renderEmpty();
+    } else {
+      fleetEl.innerHTML = agents.map(renderCard).join("");
+    }
+    renderAlerts(alerts);
+
     statusEl.textContent = `live · ${new Date().toLocaleTimeString()}`;
     statusEl.className = "status live";
   } catch (err) {
     statusEl.textContent = `error: ${err.message}`;
     statusEl.className = "status error";
+
+    if (!hasLoadedOnce) {
+      renderFirstLoadError();
+    }
+    // Otherwise lastGoodAgents is already on screen - just surface the
+    // retry banner instead of blanking the fleet.
+    showErrorBanner("Can't reach backend · retrying…");
   }
 }
+
+document.getElementById("retry-btn").addEventListener("click", () => refresh());
 
 document.getElementById("logout").addEventListener("click", async () => {
   await fetch("/api/logout", { method: "POST" });
   window.location.href = "/login.html";
 });
+
+// --- Bottom nav (mobile-first tabs) ---------------------------------------
+
+const views = {
+  overview: document.getElementById("view-overview"),
+  alerts: document.getElementById("view-alerts"),
+  settings: document.getElementById("view-settings"),
+};
+const navButtons = document.querySelectorAll(".nav-btn");
+
+function showView(name) {
+  for (const key of Object.keys(views)) {
+    views[key].hidden = key !== name;
+  }
+  navButtons.forEach((btn) => {
+    const active = btn.dataset.view === name;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-current", active ? "page" : "false");
+  });
+}
+
+navButtons.forEach((btn) => {
+  btn.addEventListener("click", () => showView(btn.dataset.view));
+});
+
+// --- Theme (dark / light / system) ----------------------------------------
+
+const THEME_KEY = "homelab-theme";
+const themeSelect = document.getElementById("theme-select");
+
+function applyTheme(theme) {
+  if (theme === "system") {
+    document.documentElement.removeAttribute("data-theme");
+  } else {
+    document.documentElement.setAttribute("data-theme", theme);
+  }
+}
+
+function initTheme() {
+  const saved = localStorage.getItem(THEME_KEY) || "system";
+  themeSelect.value = saved;
+  applyTheme(saved);
+}
+
+themeSelect.addEventListener("change", () => {
+  localStorage.setItem(THEME_KEY, themeSelect.value);
+  applyTheme(themeSelect.value);
+});
+
+initTheme();
+
+// --- Pull-to-refresh (touch only, top of the overview list) ---------------
+
+(function setupPullToRefresh() {
+  const container = document.getElementById("view-overview");
+  const indicator = document.getElementById("pull-indicator");
+  const THRESHOLD = 70;
+  let startY = null;
+  let pulling = false;
+
+  container.addEventListener(
+    "touchstart",
+    (e) => {
+      if (container.scrollTop > 0) return;
+      startY = e.touches[0].clientY;
+      pulling = true;
+    },
+    { passive: true }
+  );
+
+  container.addEventListener(
+    "touchmove",
+    (e) => {
+      if (!pulling || startY === null) return;
+      const delta = e.touches[0].clientY - startY;
+      if (delta <= 0) {
+        indicator.hidden = true;
+        return;
+      }
+      indicator.hidden = false;
+      indicator.textContent = delta > THRESHOLD ? "Release to refresh" : "Pull to refresh";
+    },
+    { passive: true }
+  );
+
+  container.addEventListener("touchend", (e) => {
+    if (!pulling || startY === null) return;
+    const delta = e.changedTouches[0].clientY - startY;
+    pulling = false;
+    startY = null;
+    indicator.hidden = true;
+    if (delta > THRESHOLD) refresh();
+  });
+})();
 
 // Kick off the first load, then poll on the interval above.
 refresh();

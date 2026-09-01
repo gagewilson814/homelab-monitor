@@ -2,10 +2,14 @@
 // dropped poll doesn't trigger a notification.
 package alert
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 type agentState struct {
 	confirmedOnline bool
+	confirmedAt     time.Time
 	pendingOnline   bool
 	pendingCount    int
 }
@@ -39,7 +43,7 @@ func (t *Tracker) Observe(address string, online bool) string {
 
 	s, exists := t.state[address]
 	if !exists {
-		t.state[address] = agentState{confirmedOnline: online}
+		t.state[address] = agentState{confirmedOnline: online, confirmedAt: time.Now()}
 		return ""
 	}
 
@@ -62,6 +66,7 @@ func (t *Tracker) Observe(address string, online bool) string {
 	}
 
 	s.confirmedOnline = online
+	s.confirmedAt = time.Now()
 	s.pendingCount = 0
 	t.state[address] = s
 
@@ -69,4 +74,21 @@ func (t *Tracker) Observe(address string, online bool) string {
 		return "online"
 	}
 	return "offline"
+}
+
+// Confirmed returns the last confirmed state for address and the time it
+// became that state. ok is false if address has never been observed. This
+// lets a caller build a snapshot of every currently-bad key (confirmed
+// online == false) without waiting for the exact poll where the transition
+// happened - useful for an aggregated "what's wrong right now" view, as
+// opposed to Observe's one-shot transition notifications.
+func (t *Tracker) Confirmed(address string) (online bool, since time.Time, ok bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	s, exists := t.state[address]
+	if !exists {
+		return false, time.Time{}, false
+	}
+	return s.confirmedOnline, s.confirmedAt, true
 }

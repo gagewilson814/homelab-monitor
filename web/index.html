@@ -14,13 +14,69 @@
   <h1>Homelab Monitor</h1>
   <div class="header-right">
     <!-- Live/connection indicator shown in the top bar; green when a poll
-         succeeds, red on failure. -->
-    <span id="status" class="status">connecting…</span>
-    <button id="logout" class="logout-btn">Log out</button>
+         succeeds, red on failure. aria-live so screen readers announce the
+         change without the user having to poll the pill themselves. -->
+    <span id="status" class="status" aria-live="polite">connecting…</span>
   </div>
 </header>
-<!-- Each agent renders as a card below; populated by app.js. -->
-<main id="fleet" class="fleet"></main>
+
+<div id="error-banner" class="error-banner" hidden>
+  <span class="error-banner-text"></span>
+  <button id="retry-btn" type="button">Retry now</button>
+</div>
+
+<main class="views">
+  <section id="view-overview" class="view">
+    <div id="pull-indicator" class="pull-indicator" hidden></div>
+    <!-- Each agent renders as a card below; populated by app.js. -->
+    <div id="fleet" class="fleet"></div>
+  </section>
+
+  <section id="view-alerts" class="view" hidden>
+    <div class="view-header">
+      <h2>Alerts</h2>
+    </div>
+    <p id="alerts-empty" class="empty-state" hidden>
+      <span>No active alerts</span>
+      <span class="muted">Everything's within threshold.</span>
+    </p>
+    <ul id="alerts-list" class="alerts-list"></ul>
+  </section>
+
+  <section id="view-settings" class="view" hidden>
+    <div class="view-header">
+      <h2>Settings</h2>
+    </div>
+    <div class="settings-row">
+      <label for="theme-select">Theme</label>
+      <select id="theme-select">
+        <option value="system">System</option>
+        <option value="dark">Dark</option>
+        <option value="light">Light</option>
+      </select>
+    </div>
+    <div class="settings-row">
+      <button id="logout" class="logout-btn">Log out</button>
+    </div>
+  </section>
+</main>
+
+<nav class="bottom-nav">
+  <button class="nav-btn active" data-view="overview" aria-current="page">
+    <span class="nav-icon" aria-hidden="true">●</span>
+    <span>Overview</span>
+  </button>
+  <button class="nav-btn" data-view="alerts" aria-current="false">
+    <span class="nav-icon" aria-hidden="true">⚠</span>
+    <span>Alerts</span>
+    <span id="nav-alert-badge" class="nav-badge" hidden>0</span>
+  </button>
+  <button class="nav-btn" data-view="settings" aria-current="false">
+    <span class="nav-icon" aria-hidden="true">⚙</span>
+    <span>Settings</span>
+  </button>
+</nav>
+
 <script>
   // Register the service worker for offline/installable support. No-op on
   // browsers without SW support; only takes effect over HTTPS or localhost.

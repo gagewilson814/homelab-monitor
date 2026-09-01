@@ -18,16 +18,75 @@
   --bad: #f2545b;
 }
 
+/* Light theme: same semantic ramp, tuned per-color for contrast on a light
+   ground. Applies automatically when the OS prefers light (and JS hasn't
+   forced a theme), or when the user picks "Light" in Settings. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    color-scheme: light;
+    --bg: #f4f6fb;
+    --panel: #ffffff;
+    --card: #ffffff;
+    --border: #d8deeb;
+    --text: #101625;
+    --muted: #5b667e;
+    --accent: #2563eb;
+    --accent-hover: #1d4fd0;
+    --ok: #17a463;
+    --warn: #b8860b;
+    --bad: #d63c46;
+  }
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f4f6fb;
+  --panel: #ffffff;
+  --card: #ffffff;
+  --border: #d8deeb;
+  --text: #101625;
+  --muted: #5b667e;
+  --accent: #2563eb;
+  --accent-hover: #1d4fd0;
+  --ok: #17a463;
+  --warn: #b8860b;
+  --bad: #d63c46;
+}
+
 * { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+}
 
 body {
   margin: 0;
+  display: flex;
+  flex-direction: column;
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  touch-action: manipulation;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+a:focus-visible,
+button:focus-visible,
+select:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 header {
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -54,12 +113,78 @@ h1 { font-size: 1.25rem; margin: 0; letter-spacing: 0.01em; }
   border: 1px solid var(--border);
   color: var(--muted);
   border-radius: 6px;
-  padding: 0.3rem 0.7rem;
-  font-size: 0.8rem;
+  padding: 0.6rem 1rem;
+  font-size: 0.9rem;
+  min-height: 44px;
   cursor: pointer;
 }
 
 .logout-btn:hover { color: var(--text); border-color: var(--accent); }
+
+/* --- Error banner: shown on a failed poll, without blanking the fleet --- */
+
+.error-banner[hidden],
+.nav-badge[hidden] {
+  display: none;
+}
+
+.error-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 1.25rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--bad);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.error-banner button {
+  background: none;
+  border: 1px solid var(--bad);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 0.4rem 0.8rem;
+  font-size: 0.8rem;
+  min-height: 36px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.error-banner button:hover { background: var(--bad); color: #1a0505; }
+
+/* --- View shell: header/banner are fixed height, the active view fills
+   the rest of the viewport and scrolls, the bottom nav stays put. --- */
+
+.views {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+
+.view {
+  height: 100%;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.view-header {
+  padding: 1.25rem 1.5rem 0;
+}
+
+.view-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.pull-indicator {
+  text-align: center;
+  padding: 0.5rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
 
 .login-body {
   display: flex;
@@ -118,6 +243,14 @@ h1 { font-size: 1.25rem; margin: 0; letter-spacing: 0.01em; }
   padding: 1.5rem;
 }
 
+@media (max-width: 480px) {
+  .fleet {
+    grid-template-columns: 1fr;
+    padding: 1rem;
+    gap: 0.75rem;
+  }
+}
+
 .card {
   background: var(--card);
   border: 1px solid var(--border);
@@ -136,6 +269,18 @@ h1 { font-size: 1.25rem; margin: 0; letter-spacing: 0.01em; }
   gap: 0.5rem;
 }
 
+/* Status is never color-alone: the dot is paired with this text label. */
+.state-label {
+  margin-left: auto;
+  font-size: 0.7rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ok);
+}
+
+.card.offline .state-label { color: var(--bad); }
+
 .dot {
   width: 8px;
   height: 8px;
@@ -146,6 +291,15 @@ h1 { font-size: 1.25rem; margin: 0; letter-spacing: 0.01em; }
 
 .card.offline .dot { background: var(--bad); }
 .dot.bad { background: var(--bad); }
+
+.dot.pulse {
+  animation: dot-pulse 2s ease-in-out infinite;
+}
+
+@keyframes dot-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(242, 84, 91, 0.5); }
+  50% { box-shadow: 0 0 0 5px rgba(242, 84, 91, 0); }
+}
 
 .service-name {
   display: inline-flex;
@@ -181,7 +335,197 @@ h1 { font-size: 1.25rem; margin: 0; letter-spacing: 0.01em; }
 .metric .bar > i.warn { background: var(--warn); }
 .metric .bar > i.bad { background: var(--bad); }
 
+.metric .spark {
+  flex: 1;
+  height: 18px;
+  margin: 0 0.6rem;
+  display: block;
+}
+
+.metric .spark polyline {
+  fill: none;
+  stroke: var(--ok);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.metric .spark.warn polyline { stroke: var(--warn); }
+.metric .spark.bad polyline { stroke: var(--bad); }
+
 .error-text {
   color: var(--bad);
   font-size: 0.85rem;
+}
+
+/* --- Loading skeleton: shown only before the first successful poll --- */
+
+.skeleton-chip,
+.skeleton-line {
+  background: linear-gradient(90deg, var(--border) 25%, var(--card) 37%, var(--border) 63%);
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.4s ease infinite;
+  border-radius: 4px;
+}
+
+.skeleton-chip {
+  display: inline-block;
+  height: 0.9rem;
+}
+
+.skeleton-line {
+  height: 0.85rem;
+  margin: 0.5rem 0;
+}
+
+@keyframes skeleton-shimmer {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+
+/* --- Empty / first-load-error state --- */
+
+.empty-state {
+  text-align: center;
+  padding: 3rem 1.5rem;
+  color: var(--text);
+}
+
+.empty-state .muted,
+.empty-state span.muted {
+  display: block;
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin-top: 0.35rem;
+}
+
+/* --- Alerts view --- */
+
+.alerts-list {
+  list-style: none;
+  margin: 0;
+  padding: 1rem 1.5rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.alert-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--bad);
+  border-radius: 8px;
+  padding: 0.65rem 0.9rem;
+}
+
+.alert-item.alert-threshold { border-left-color: var(--warn); }
+
+.alert-icon {
+  flex-shrink: 0;
+  font-size: 0.9rem;
+  line-height: 1.4;
+  color: var(--bad);
+}
+
+.alert-item.alert-threshold .alert-icon { color: var(--warn); }
+
+.alert-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.alert-message {
+  font-size: 0.9rem;
+  color: var(--text);
+}
+
+.alert-since {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+/* --- Settings view --- */
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-row label {
+  font-size: 0.9rem;
+  color: var(--text);
+}
+
+#theme-select {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.85rem;
+  min-height: 40px;
+}
+
+/* --- Bottom navigation: thumb-reachable tab bar for the primary (mobile)
+   surface. Each button is a real button with an icon + text label, never
+   just an icon, and meets the 44px touch-target minimum. --- */
+
+.bottom-nav {
+  flex: none;
+  display: flex;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+.nav-btn {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  min-height: 56px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.nav-btn .nav-icon {
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.nav-btn.active {
+  color: var(--accent);
+}
+
+.nav-badge {
+  position: absolute;
+  top: 4px;
+  right: calc(50% - 22px);
+  background: var(--bad);
+  color: #1a0505;
+  font-size: 0.65rem;
+  font-weight: 700;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
 }
