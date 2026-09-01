@@ -104,6 +104,41 @@ DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...' \
 go run ./cmd/backend
 ```
 
+## Testing
+
+Tests use the standard library `testing` framework with `net/http/httptest` fakes wherever a live dependency would be needed (a fake Agent server and a recording Discord notifier), so the whole suite runs with no network access:
+
+```bash
+# run the whole suite
+ go test ./...
+
+# one package, or a single test by name
+ go test ./internal/auth/ -run TestValid
+
+# race detector
+ go test -race ./...
+```
+
+| Package | What's tested |
+|---------|---------------|
+| `internal/auth` | login/logout flow, bad password, missing hash |
+| `internal/stats` | `stats()` response shape + JSON wire format |
+| `internal/notify` | Discord `Send` is a no-op when the webhook is unset; error on a bad status |
+| `internal/alert` | debounce thresholds, online/offline transitions |
+| `cmd/backend` | `poll`/`pollAll` error handling, alert transitions, fleet handler + auth gate, agent-list parsing |
+
+Everything runs on the same platform you build on. The `gopsutil`-based stats tests only cover the host they run on, but the backend and agent logic is platform-independent.
+
+## Configuration
+
+| Env var | Purpose | Default |
+|---------|---------|---------|
+| `HOMELAB_PASSWORD_HASH` | bcrypt hash of the dashboard/API password (required) | — |
+| `HOMELAB_AGENTS` | comma-separated `host:port` agents to poll | `localhost:8080,localhost:8081` |
+| `HOMELAB_POLL_INTERVAL` | backend poll cadence, in seconds | `5` |
+| `DISCORD_WEBHOOK_URL` | Discord webhook for online/offline alerts (optional) | unset = no alerts |
+| `DISCORD_ALERT_THRESHOLD` | consecutive polls to confirm a transition | `2` |
+
 ## Roadmap
 
 - [x] Walking-skeleton HTTP server with `/stats` endpoint
