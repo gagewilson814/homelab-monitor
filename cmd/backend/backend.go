@@ -6,7 +6,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"homeserver-monitor/internal/agentstore"
 	"homeserver-monitor/internal/alert"
 	"homeserver-monitor/internal/auth"
 	"homeserver-monitor/internal/notify"
@@ -21,7 +23,27 @@ import (
 	"time"
 )
 
+// serverAddresses is the *initial* agent list, parsed from HOMELAB_AGENTS.
+// It only matters the first time the process runs: agentStore persists
+// whatever list is actually in effect (including agents added or removed
+// from the dashboard) to disk from then on, so this env var stops being
+// consulted once that file exists.
 var serverAddresses = getServerAddresses(os.Getenv("HOMELAB_AGENTS"))
+
+// agentStore is the persisted, mutable set of monitored agents (address +
+// tag). It's nil until main() loads it, then read by pollLoop every cycle
+// and read/written by agentsHandler in response to dashboard edits.
+var agentStore *agentstore.Store
+
+// getAgentsFile reads HOMELAB_AGENTS_FILE, the JSON file that persists the
+// monitored agent list (address + tag) across restarts, defaulting to
+// data/agents.json under the working directory.
+func getAgentsFile(env string) string {
+	if env != "" {
+		return env
+	}
+	return "data/agents.json"
+}
 
 // discordNotifier sends the up/down alerts. Its webhook URL is optional -
 // an empty DISCORD_WEBHOOK_URL just makes Send a no-op, so alerting is
@@ -56,6 +78,20 @@ func lookupHostname(address string) string {
 	hostnameMu.Lock()
 	defer hostnameMu.Unlock()
 	return hostnameCache[address]
+}
+
+// displayName returns the friendliest available label for an agent: its
+// user-assigned tag if it has one, else its last-known hostname, else the
+// bare address - each suffixed with the address so alerts/messages stay
+// unambiguous even when two agents share a tag or hostname.
+func displayName(address string) string {
+	if tag := agentStore.Tag(address); tag != "" {
+		return fmt.Sprintf("%s (%s)", tag, address)
+	}
+	if hostname := lookupHostname(address); hostname != "" {
+		return fmt.Sprintf("%s (%s)", hostname, address)
+	}
+	return address
 }
 
 // lastSeenCache remembers when each agent was last observed online, so an
@@ -231,6 +267,10 @@ type AgentResponse struct {
 	Err      string          `json:"error,omitempty"`
 	LastSeen *time.Time      `json:"last_seen,omitempty"`
 	History  *MetricHistory  `json:"history,omitempty"`
+	// Tag is stamped in at serve time (see fleetHandler), not poll time, so
+	// editing a tag from the dashboard is reflected immediately rather than
+	// waiting for the next background poll.
+	Tag string `json:"tag,omitempty"`
 }
 
 // poll fetches a single agent's /stats endpoint and decodes it. Any of the
@@ -325,7 +365,7 @@ type Alert struct {
 // process.
 func pollLoop(interval time.Duration) {
 	for {
-		results := pollAll(serverAddresses)
+		results := pollAll(agentStore.Addresses())
 		annotateLastSeen(results)
 		annotateHistory(results)
 		alerts := checkAlerts(results)
@@ -345,23 +385,109 @@ func pollLoop(interval time.Duration) {
 // fleetHandler serves the latest cached poll results as JSON. It doesn't
 // poll anything itself - pollLoop already keeps fleetCache fresh - so
 // requests return immediately instead of waiting on agent network calls.
+//
+// Tags are stamped in and removed agents are filtered out here, at serve
+// time, rather than baked into fleetCache at poll time - so editing a tag
+// or removing an agent from the dashboard is reflected on the very next
+// request instead of waiting up to one poll interval.
 func fleetHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
 	fleetCacheMu.RLock()
 	results := fleetCache
 	fleetCacheMu.RUnlock()
 
-	if err := json.NewEncoder(w).Encode(results); err != nil {
+	visible := make([]AgentResponse, 0, len(results))
+	for _, res := range results {
+		if !agentStore.Has(res.Address) {
+			continue
+		}
+		res.Tag = agentStore.Tag(res.Address)
+		visible = append(visible, res)
+	}
+
+	writeJSON(w, visible)
+}
+
+// writeJSON encodes v as the JSON response body. Callers that need a
+// non-200 status must call w.WriteHeader before this.
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Println("Error encoding JSON response: ", err)
+	}
+}
+
+// agentsHandler manages the persisted set of monitored agents: GET lists
+// them, POST adds one, PUT updates an existing one's tag, and DELETE
+// (?address=...) removes one. Every mutation persists via agentStore
+// immediately, so it survives a restart; pollLoop picks up an added or
+// removed address on its next cycle, while fleetHandler reflects a tag
+// edit or removal on the very next request (see its comment).
+func agentsHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, agentStore.List())
+
+	case http.MethodPost:
+		var body struct {
+			Address string `json:"address"`
+			Tag     string `json:"tag"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		agent, err := agentStore.Add(body.Address, body.Tag)
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, agentstore.ErrExists) {
+				status = http.StatusConflict
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		writeJSON(w, agent)
+
+	case http.MethodPut:
+		var body struct {
+			Address string `json:"address"`
+			Tag     string `json:"tag"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		if err := agentStore.SetTag(body.Address, body.Tag); err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, agentstore.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	case http.MethodDelete:
+		address := r.URL.Query().Get("address")
+		if err := agentStore.Remove(address); err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, agentstore.ErrNotFound) {
+				status = http.StatusNotFound
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		w.Header().Set("Allow", "GET, POST, PUT, DELETE")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 
 // alertsHandler serves the latest cached alerts list as JSON, the same
 // cache-only pattern as fleetHandler.
 func alertsHandler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
 	alertsCacheMu.RLock()
 	alerts := alertsCache
 	alertsCacheMu.RUnlock()
@@ -369,9 +495,7 @@ func alertsHandler(w http.ResponseWriter, r *http.Request) {
 	if alerts == nil {
 		alerts = []Alert{}
 	}
-	if err := json.NewEncoder(w).Encode(alerts); err != nil {
-		log.Println("Error encoding JSON response: ", err)
-	}
+	writeJSON(w, alerts)
 }
 
 // checkAlerts feeds each poll result through the debounce tracker, firing a
@@ -384,10 +508,7 @@ func checkAlerts(results []AgentResponse) []Alert {
 
 	for _, result := range results {
 		rememberHostname(result.Address, result.Data)
-		name := result.Address
-		if hostname := lookupHostname(result.Address); hostname != "" {
-			name = fmt.Sprintf("%s (%s)", hostname, result.Address)
-		}
+		name := displayName(result.Address)
 
 		online := result.Err == ""
 		if transition := alertTracker.Observe(result.Address, online); transition != "" {
@@ -490,11 +611,19 @@ func main() {
 	}
 	authStore := auth.NewStore(passwordHash)
 
+	agentsFile := getAgentsFile(os.Getenv("HOMELAB_AGENTS_FILE"))
+	store, err := agentstore.Load(agentsFile, serverAddresses)
+	if err != nil {
+		log.Fatal("failed to load agent store: ", err)
+	}
+	agentStore = store
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/login", authStore.LoginHandler)
 	mux.HandleFunc("/api/logout", authStore.LogoutHandler)
 	mux.HandleFunc("/api/fleet", authStore.RequireAPI(fleetHandler))
 	mux.HandleFunc("/api/alerts", authStore.RequireAPI(alertsHandler))
+	mux.HandleFunc("/api/agents", authStore.RequireAPI(agentsHandler))
 
 	// login.html/js/css must stay reachable without a session, or nobody
 	// could ever log in. Registered as exact paths so they win over the "/"
@@ -506,7 +635,7 @@ func main() {
 	mux.Handle("/", authStore.RequirePage(http.FileServer(http.Dir("web"))))
 
 	pollInterval := getPollInterval()
-	log.Println("Polling agents:", serverAddresses, "every", pollInterval)
+	log.Println("Polling agents:", agentStore.Addresses(), "every", pollInterval, "(persisted at", agentsFile+")")
 	if os.Getenv("DISCORD_WEBHOOK_URL") == "" {
 		log.Println("Discord alerts disabled (DISCORD_WEBHOOK_URL not set)")
 	} else {
@@ -517,7 +646,7 @@ func main() {
 	// Poll once synchronously so fleetCache isn't empty for the first
 	// request, then hand off to the background loop for the life of the
 	// process.
-	fleetCache = pollAll(serverAddresses)
+	fleetCache = pollAll(agentStore.Addresses())
 	annotateLastSeen(fleetCache)
 	annotateHistory(fleetCache)
 	alertsCache = checkAlerts(fleetCache)

@@ -40,6 +40,15 @@ function formatLastSeen(iso) {
   return `${Math.floor(h / 24)}d ago`;
 }
 
+// Escape text for safe interpolation into innerHTML. Only actually needed
+// for user-entered fields (currently just the tag), but cheap enough to
+// apply everywhere it's used.
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+
 // Map a percentage to a CSS class that colors its bar: green default,
 // yellow from 70%, red from 90%.
 function barClass(pct) {
@@ -93,6 +102,28 @@ function serviceRow(svc) {
     </div>`;
 }
 
+// Build the card's title row: status dot, display name (tag if set, else
+// hostname/address), an optional tag chip, the online/offline text label,
+// and an edit button that opens the add/edit-agent modal for this address.
+function cardHeader(agent, online, primaryLabel) {
+  const tagChip = agent.tag ? `<span class="tag-chip">${escapeHtml(agent.tag)}</span>` : "";
+  const editBtn = `<button
+      class="card-edit-btn"
+      type="button"
+      data-address="${escapeHtml(agent.address)}"
+      data-tag="${escapeHtml(agent.tag || "")}"
+      aria-label="Edit ${escapeHtml(agent.tag || primaryLabel)}"
+    >✎</button>`;
+  return `
+    <h2>
+      <span class="dot${online ? "" : " pulse"}"></span>${escapeHtml(primaryLabel)}${tagChip}
+      <span class="card-header-actions">
+        <span class="state-label">${online ? "online" : "offline"}</span>
+        ${editBtn}
+      </span>
+    </h2>`;
+}
+
 // Render a single agent card. Offline agents (with an error) get a distinct
 // "offline" styling and show the failure reason; healthy agents render
 // their hostname and metric rows.
@@ -104,8 +135,8 @@ function renderCard(agent) {
   if (agent.error) {
     return `
       <div class="card offline">
-        <h2><span class="dot pulse"></span>${agent.address}<span class="state-label">offline</span></h2>
-        <div class="error-text">${agent.error}</div>
+        ${cardHeader(agent, false, agent.address)}
+        <div class="error-text">${escapeHtml(agent.error)}</div>
         ${lastSeenRow}
       </div>`;
   }
@@ -115,12 +146,12 @@ function renderCard(agent) {
   const services = (d.services || []).map(serviceRow).join("");
   return `
     <div class="card">
-      <h2><span class="dot"></span>${d.hostname}<span class="state-label">online</span></h2>
+      ${cardHeader(agent, true, d.hostname)}
       ${metricRow("CPU", d.cpu_usage, h.cpu)}
       ${metricRow("Memory", d.memory_usage, h.mem)}
       ${metricRow("Disk", d.disk_usage, h.disk)}
       <div class="metric"><span>Uptime</span><span>${formatUptime(d.uptime)}</span></div>
-      <div class="metric"><span>Address</span><span>${agent.address}</span></div>
+      <div class="metric"><span>Address</span><span>${escapeHtml(agent.address)}</span></div>
       ${lastSeenRow}
       ${services}
     </div>`;
@@ -265,6 +296,7 @@ const views = {
   settings: document.getElementById("view-settings"),
 };
 const navButtons = document.querySelectorAll(".nav-btn");
+const addAgentFab = document.getElementById("add-agent-fab");
 
 function showView(name) {
   for (const key of Object.keys(views)) {
@@ -275,6 +307,7 @@ function showView(name) {
     btn.classList.toggle("active", active);
     btn.setAttribute("aria-current", active ? "page" : "false");
   });
+  addAgentFab.hidden = name !== "overview";
 }
 
 navButtons.forEach((btn) => {
@@ -350,6 +383,138 @@ initTheme();
     if (delta > THRESHOLD) refresh();
   });
 })();
+
+// --- Agent management: add via the FAB, edit/remove via a card's ✎ -------
+
+const agentModal = document.getElementById("agent-modal");
+const agentModalTitle = document.getElementById("agent-modal-title");
+const addressInput = document.getElementById("agent-address-input");
+const tagInput = document.getElementById("agent-tag-input");
+const modalError = document.getElementById("agent-modal-error");
+const removeBtn = document.getElementById("agent-remove-btn");
+
+let modalMode = "add"; // or "edit"
+let editingAddress = null;
+let confirmingRemove = false;
+let removeConfirmTimer = null;
+
+function showModalError(message) {
+  modalError.textContent = message;
+  modalError.hidden = false;
+}
+
+function resetRemoveConfirm() {
+  confirmingRemove = false;
+  removeBtn.textContent = "Remove server";
+  clearTimeout(removeConfirmTimer);
+}
+
+function openAddModal() {
+  modalMode = "add";
+  editingAddress = null;
+  agentModalTitle.textContent = "Add server";
+  addressInput.value = "";
+  addressInput.disabled = false;
+  tagInput.value = "";
+  modalError.hidden = true;
+  removeBtn.hidden = true;
+  resetRemoveConfirm();
+  agentModal.hidden = false;
+  addressInput.focus();
+}
+
+function openEditModal(address, tag) {
+  modalMode = "edit";
+  editingAddress = address;
+  agentModalTitle.textContent = "Edit server";
+  addressInput.value = address;
+  addressInput.disabled = true;
+  tagInput.value = tag || "";
+  modalError.hidden = true;
+  removeBtn.hidden = false;
+  resetRemoveConfirm();
+  agentModal.hidden = false;
+  tagInput.focus();
+}
+
+function closeModal() {
+  agentModal.hidden = true;
+  resetRemoveConfirm();
+}
+
+async function saveAgent() {
+  const tag = tagInput.value.trim();
+  modalError.hidden = true;
+
+  if (modalMode === "add") {
+    const address = addressInput.value.trim();
+    if (!address) {
+      showModalError("Address is required.");
+      return;
+    }
+    const res = await fetch("/api/agents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ address, tag }),
+    });
+    if (!res.ok) {
+      showModalError(await res.text());
+      return;
+    }
+  } else {
+    const res = await fetch("/api/agents", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ address: editingAddress, tag }),
+    });
+    if (!res.ok) {
+      showModalError(await res.text());
+      return;
+    }
+  }
+
+  closeModal();
+  refresh();
+}
+
+document.getElementById("add-agent-fab").addEventListener("click", openAddModal);
+document.getElementById("agent-cancel-btn").addEventListener("click", closeModal);
+document.getElementById("agent-save-btn").addEventListener("click", saveAgent);
+
+// One tap arms a 3s confirmation window instead of a blocking native
+// confirm() dialog; a second tap within that window actually removes it.
+removeBtn.addEventListener("click", async () => {
+  if (!confirmingRemove) {
+    confirmingRemove = true;
+    removeBtn.textContent = "Confirm remove?";
+    removeConfirmTimer = setTimeout(resetRemoveConfirm, 3000);
+    return;
+  }
+  const res = await fetch(`/api/agents?address=${encodeURIComponent(editingAddress)}`, { method: "DELETE" });
+  if (!res.ok) {
+    showModalError(await res.text());
+    resetRemoveConfirm();
+    return;
+  }
+  closeModal();
+  refresh();
+});
+
+agentModal.addEventListener("click", (e) => {
+  if (e.target === agentModal) closeModal();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !agentModal.hidden) closeModal();
+});
+
+// Event delegation: fleetEl's innerHTML is replaced wholesale on every
+// refresh, so a single listener on the stable container beats re-binding a
+// click handler per card-edit button on every render.
+fleetEl.addEventListener("click", (e) => {
+  const btn = e.target.closest(".card-edit-btn");
+  if (!btn) return;
+  openEditModal(btn.dataset.address, btn.dataset.tag);
+});
 
 // Kick off the first load, then poll on the interval above.
 refresh();

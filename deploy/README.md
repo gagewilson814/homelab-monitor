@@ -10,16 +10,19 @@ open with `go run`.
 
    ```bash
    go build -o /usr/local/bin/homelab-agent ./cmd/agent
-   # Backend also needs its ./web directory alongside the binary:
-   sudo mkdir -p /opt/homelab-monitor
+   # Backend also needs its ./web directory alongside the binary, plus a
+   # writable data/ dir for the persisted agent list/tags (see below):
+   sudo mkdir -p /opt/homelab-monitor/data
    go build -o /opt/homelab-monitor/homelab-backend ./cmd/backend
    sudo cp -r web /opt/homelab-monitor/web
    ```
 
-2. Create a dedicated user (no login shell, no home directory needed):
+2. Create a dedicated user (no login shell, no home directory needed), and
+   hand it ownership of the data directory created above:
 
    ```bash
    sudo useradd --system --no-create-home --shell /usr/sbin/nologin homelab
+   sudo chown homelab:homelab /opt/homelab-monitor/data
    ```
 
 3. Set up the env file(s). Only copy the one(s) for the service you're
@@ -54,10 +57,11 @@ open with `go run`.
    ```
 
 The units run as the unprivileged `homelab` user with `ProtectSystem=strict`
-and `NoNewPrivileges=yes`, and restart on failure after 5s. If a future
-change makes the Backend write to disk (e.g. the planned SQL-backed
-dashboard), its unit will need `ReadWritePaths=` added for wherever that
-data lives - `ProtectSystem=strict` makes everything else read-only.
+and `NoNewPrivileges=yes`, and restart on failure after 5s. The Backend
+persists its agent list/tags to `data/agents.json` (see `HOMELAB_AGENTS_FILE`
+in the main README), so its unit declares
+`ReadWritePaths=/opt/homelab-monitor/data` - the one directory it can write
+to; `ProtectSystem=strict` makes everything else read-only.
 
 ## Windows
 

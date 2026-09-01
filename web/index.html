@@ -30,6 +30,7 @@
     <div id="pull-indicator" class="pull-indicator" hidden></div>
     <!-- Each agent renders as a card below; populated by app.js. -->
     <div id="fleet" class="fleet"></div>
+    <button id="add-agent-fab" class="fab" type="button" aria-label="Add server">+</button>
   </section>
 
   <section id="view-alerts" class="view" hidden>
@@ -76,6 +77,28 @@
     <span>Settings</span>
   </button>
 </nav>
+
+<div id="agent-modal" class="modal-overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="agent-modal-title">
+    <h3 id="agent-modal-title">Add server</h3>
+    <label class="modal-field">
+      Address
+      <input id="agent-address-input" type="text" placeholder="192.168.1.50:8080" autocomplete="off">
+    </label>
+    <label class="modal-field">
+      Tag <span class="muted">(optional)</span>
+      <input id="agent-tag-input" type="text" placeholder="e.g. Plex server" autocomplete="off" maxlength="60">
+    </label>
+    <p id="agent-modal-error" class="error-text" hidden></p>
+    <div class="modal-actions">
+      <button id="agent-remove-btn" class="danger-btn" type="button" hidden>Remove server</button>
+      <div class="modal-actions-right">
+        <button id="agent-cancel-btn" class="modal-cancel-btn" type="button">Cancel</button>
+        <button id="agent-save-btn" class="modal-save-btn" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
   // Register the service worker for offline/installable support. No-op on

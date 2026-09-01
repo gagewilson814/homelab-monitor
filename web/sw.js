@@ -9,7 +9,7 @@
  *     versions and claims the client so the new shell serves immediately.
  */
 
-const CACHE_VERSION = "v2";
+const CACHE_VERSION = "v3";
 const SHELL_CACHE = CACHE_VERSION + ":shell";
 const API_CACHE = CACHE_VERSION + ":api";
 
@@ -63,7 +63,13 @@ self.addEventListener("fetch", (event) => {
       caches.match(shellURL).then((cached) =>
         cached ||
           fetch(event.request).then((resp) => {
-            if (!resp || resp.status >= 400) return resp;
+            // An unauthenticated request for "/" gets redirected to
+            // login.html by the server; fetch() follows that transparently,
+            // so resp here would actually be the login page. Don't cache
+            // that under the index.html key - it would poison the shell
+            // cache and later serve the login page in place of the real
+            // dashboard even once the user is logged in.
+            if (!resp || resp.status >= 400 || resp.redirected) return resp;
             return caches
               .open(SHELL_CACHE)
               .then((cache) => cache.put(shellURL, resp.clone()))

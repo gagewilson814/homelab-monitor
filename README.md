@@ -67,7 +67,9 @@ Each check is a plain TCP dial to `localhost:<port>` — it confirms something i
 
 ### Backend + Dashboard
 
-The backend must be run from the repo root (it serves the `web/` directory) or run through the go tool below. It polls agents listed in the comma-separated `HOMELAB_AGENTS` env var (defaults to `localhost:8080,localhost:8081`) on its own background schedule, every `HOMELAB_POLL_INTERVAL` seconds (default `5`) — this runs continuously regardless of whether the dashboard is open, so alerting stays live even if nobody's looking at it.
+The backend must be run from the repo root (it serves the `web/` directory) or run through the go tool below. It polls its configured agents on its own background schedule, every `HOMELAB_POLL_INTERVAL` seconds (default `5`) — this runs continuously regardless of whether the dashboard is open, so alerting stays live even if nobody's looking at it.
+
+The agent list itself is *not* fixed at startup: the comma-separated `HOMELAB_AGENTS` env var (defaults to `localhost:8080,localhost:8081`) only seeds it the first time the backend ever runs. From then on the list lives in `HOMELAB_AGENTS_FILE` (default `data/agents.json`, created automatically) and is managed from the dashboard — see [Managing agents](#managing-agents) below. Changing `HOMELAB_AGENTS` after that file exists has no effect; edit or delete the file instead.
 
 The dashboard and `/api/fleet` require a login. Set `HOMELAB_PASSWORD_HASH` to a bcrypt hash of your chosen password — the backend refuses to start without it. Generate one with the bundled `hashpw` tool:
 
@@ -106,6 +108,25 @@ go run ./cmd/backend
 
 The same debounced alerting also covers sustained resource usage — an agent whose CPU, memory, or disk stays above `HOMELAB_CPU_THRESHOLD` / `HOMELAB_MEM_THRESHOLD` / `HOMELAB_DISK_THRESHOLD` (each default `90`%) for `DISCORD_ALERT_THRESHOLD` consecutive polls fires an alert, and another when it recovers.
 
+### Managing agents
+
+Add, remove, and tag agents from the dashboard itself instead of editing env vars — tap the blue **+** on the Overview tab to add one by `host:port` (with an optional tag, e.g. "Plex server"), or tap a card's edit (✎) icon to rename its tag or remove it. Changes persist immediately to `HOMELAB_AGENTS_FILE` and survive both a logout and a backend restart; polling picks up an added/removed agent on its next cycle (within one `HOMELAB_POLL_INTERVAL`), while a tag edit shows up on the very next dashboard refresh.
+
+The same is available directly via the API (`POST`/`PUT`/`DELETE /api/agents`, all requiring the session cookie) if you'd rather script it:
+
+```bash
+# add an agent
+curl -b cookies.txt -X POST localhost:9090/api/agents \
+  -d '{"address":"192.168.1.12:8080","tag":"NAS"}'
+
+# retag an existing one
+curl -b cookies.txt -X PUT localhost:9090/api/agents \
+  -d '{"address":"192.168.1.12:8080","tag":"Backup box"}'
+
+# remove one
+curl -b cookies.txt -X DELETE 'localhost:9090/api/agents?address=192.168.1.12:8080'
+```
+
 ### Last seen
 
 Every fleet entry carries a `last_seen` timestamp — the last time that agent was successfully polled. It's tracked automatically (no config needed) and persists through an outage, so an offline card shows *when* it went down instead of just that it's down.
@@ -139,7 +160,8 @@ Tests use the standard library `testing` framework with `net/http/httptest` fake
 | `internal/stats` | `stats()` response shape + JSON wire format |
 | `internal/notify` | Discord `Send` is a no-op when the webhook is unset; error on a bad status |
 | `internal/alert` | debounce thresholds, online/offline transitions |
-| `cmd/backend` | `poll`/`pollAll` error handling, alert transitions, threshold alerts, last-seen tracking, fleet handler + auth gate, agent-list parsing |
+| `internal/agentstore` | persisted agent CRUD, address validation, atomic writes surviving a reload |
+| `cmd/backend` | `poll`/`pollAll` error handling, alert transitions, threshold alerts, last-seen tracking, fleet/alerts/agents handlers + auth gate, agent-list parsing |
 
 Everything runs on the same platform you build on. The `gopsutil`-based stats tests only cover the host they run on, but the backend and agent logic is platform-independent.
 
@@ -148,7 +170,8 @@ Everything runs on the same platform you build on. The `gopsutil`-based stats te
 | Env var | Purpose | Default |
 |---------|---------|---------|
 | `HOMELAB_PASSWORD_HASH` | bcrypt hash of the dashboard/API password (required) | — |
-| `HOMELAB_AGENTS` | comma-separated `host:port` agents to poll | `localhost:8080,localhost:8081` |
+| `HOMELAB_AGENTS` | comma-separated `host:port` agents to poll - only used to seed `HOMELAB_AGENTS_FILE` the first time it doesn't exist | `localhost:8080,localhost:8081` |
+| `HOMELAB_AGENTS_FILE` | JSON file persisting the agent list/tags managed from the dashboard | `data/agents.json` |
 | `HOMELAB_POLL_INTERVAL` | backend poll cadence, in seconds | `5` |
 | `DISCORD_WEBHOOK_URL` | Discord webhook for online/offline alerts (optional) | unset = no alerts |
 | `DISCORD_ALERT_THRESHOLD` | consecutive polls to confirm a transition | `2` |
@@ -163,7 +186,7 @@ Everything runs on the same platform you build on. The `gopsutil`-based stats te
 - [x] Real disk usage metrics
 - [x] Real uptime metrics
 - [x] Backend service that polls Agents across the home network (concurrent, via goroutines)
-- [x] Minimal read-only web dashboard (no SQL yet)
+- [x] Minimal web dashboard (no SQL yet - agent config is a JSON file)
 - [x] Single-user session-cookie authentication for the dashboard/API (non-negotiable before restart ships)
 - [x] Discord alerts on agent online/offline transitions (debounced)
 - [x] Backend polls on its own background schedule, independent of the dashboard being open
@@ -172,6 +195,8 @@ Everything runs on the same platform you build on. The `gopsutil`-based stats te
 - [x] Threshold alerts (sustained high CPU/mem, disk nearing full)
 - [x] "Last seen" timestamp per agent on the dashboard
 - [x] Agents run as a system service (systemd/Windows service) so they survive a reboot unattended
+- [x] Add/remove/tag agents from the dashboard, persisted across restarts and logins (no more fixed two-agent env var)
+- [x] Metric history sparklines, an aggregated alerts view, and mobile-first chrome (bottom nav, loading/error/empty states)
 - [ ] Remote restart capability (deprioritized for now)
 - [ ] SQL-backed dashboard with user login
 

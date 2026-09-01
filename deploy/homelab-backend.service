@@ -15,6 +15,10 @@ Group=homelab
 NoNewPrivileges=yes
 ProtectSystem=strict
 PrivateTmp=yes
+# The dashboard's agent list/tags persist to data/agents.json, resolved
+# relative to WorkingDirectory - ProtectSystem=strict makes everything else
+# read-only, so this is the one directory the backend can write to.
+ReadWritePaths=/opt/homelab-monitor/data
 
 [Install]
 WantedBy=multi-user.target

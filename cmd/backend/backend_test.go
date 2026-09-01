@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"homeserver-monitor/internal/agentstore"
 	"homeserver-monitor/internal/alert"
 	"homeserver-monitor/internal/auth"
 	"homeserver-monitor/internal/stats"
@@ -124,6 +126,7 @@ func installTestState(t *testing.T, fa *fakeAgent) {
 	t.Helper()
 	alertTracker = alert.NewTracker(1)
 	serverAddresses = []string{fa.address()}
+	agentStore = newTestAgentStore(t, fa.address())
 	fleetCacheMu.Lock()
 	fleetCache = nil
 	fleetCacheMu.Unlock()
@@ -133,6 +136,19 @@ func installTestState(t *testing.T, fa *fakeAgent) {
 	historyMu.Lock()
 	historyCache = make(map[string]*MetricHistory)
 	historyMu.Unlock()
+}
+
+// newTestAgentStore returns a fresh, temp-file-backed agentstore.Store
+// seeded with addresses - the same store fleetHandler/agentsHandler/
+// checkAlerts consult via the package-level agentStore var.
+func newTestAgentStore(t *testing.T, addresses ...string) *agentstore.Store {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "agents.json")
+	store, err := agentstore.Load(path, addresses)
+	if err != nil {
+		t.Fatalf("load test agent store: %v", err)
+	}
+	return store
 }
 
 func TestPollSuccess(t *testing.T) {
@@ -470,6 +486,184 @@ func TestFleetHandlerServesCache(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Data == nil {
 		t.Fatalf("fleet handler returned %+v", got)
+	}
+}
+
+func TestFleetHandlerReflectsTagImmediately(t *testing.T) {
+	fa := newFakeAgent(t, "node1")
+	installTestState(t, fa)
+
+	good := poll(fa.address())
+	fleetCacheMu.Lock()
+	fleetCache = []AgentResponse{good}
+	fleetCacheMu.Unlock()
+
+	if err := agentStore.SetTag(fa.address(), "Plex server"); err != nil {
+		t.Fatalf("SetTag: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	fleetHandler(rr, httptest.NewRequest(http.MethodGet, "/api/fleet", nil))
+	var got []AgentResponse
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode fleet: %v", err)
+	}
+	if len(got) != 1 || got[0].Tag != "Plex server" {
+		t.Fatalf("fleet handler tag = %+v, want Plex server reflected without a re-poll", got)
+	}
+}
+
+func TestFleetHandlerFiltersRemovedAgent(t *testing.T) {
+	fa := newFakeAgent(t, "node1")
+	installTestState(t, fa)
+
+	good := poll(fa.address())
+	fleetCacheMu.Lock()
+	fleetCache = []AgentResponse{good}
+	fleetCacheMu.Unlock()
+
+	if err := agentStore.Remove(fa.address()); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	rr := httptest.NewRecorder()
+	fleetHandler(rr, httptest.NewRequest(http.MethodGet, "/api/fleet", nil))
+	var got []AgentResponse
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode fleet: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("fleet handler should filter out a removed agent without a re-poll, got %+v", got)
+	}
+}
+
+func TestAgentsHandlerGetListsConfigured(t *testing.T) {
+	agentStore = newTestAgentStore(t, "a:1", "b:2")
+
+	rr := httptest.NewRecorder()
+	agentsHandler(rr, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET code = %d, want 200", rr.Code)
+	}
+	var got []agentstore.Agent
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("agents = %+v, want 2", got)
+	}
+}
+
+func TestAgentsHandlerPostAddsAgent(t *testing.T) {
+	agentStore = newTestAgentStore(t)
+
+	body := strings.NewReader(`{"address":"192.168.1.10:8080","tag":"NAS"}`)
+	rr := httptest.NewRecorder()
+	agentsHandler(rr, httptest.NewRequest(http.MethodPost, "/api/agents", body))
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("POST code = %d, want 201, body=%s", rr.Code, rr.Body.String())
+	}
+
+	var got agentstore.Agent
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Address != "192.168.1.10:8080" || got.Tag != "NAS" {
+		t.Fatalf("created agent = %+v", got)
+	}
+	if !agentStore.Has("192.168.1.10:8080") {
+		t.Fatal("agent should be persisted in the store after POST")
+	}
+}
+
+func TestAgentsHandlerPostRejectsInvalidAddress(t *testing.T) {
+	agentStore = newTestAgentStore(t)
+
+	body := strings.NewReader(`{"address":"not-an-address"}`)
+	rr := httptest.NewRecorder()
+	agentsHandler(rr, httptest.NewRequest(http.MethodPost, "/api/agents", body))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("POST invalid address code = %d, want 400", rr.Code)
+	}
+}
+
+func TestAgentsHandlerPostRejectsDuplicate(t *testing.T) {
+	agentStore = newTestAgentStore(t, "a:1")
+
+	body := strings.NewReader(`{"address":"a:1"}`)
+	rr := httptest.NewRecorder()
+	agentsHandler(rr, httptest.NewRequest(http.MethodPost, "/api/agents", body))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("POST duplicate code = %d, want 409", rr.Code)
+	}
+}
+
+func TestAgentsHandlerPutUpdatesTag(t *testing.T) {
+	agentStore = newTestAgentStore(t, "a:1")
+
+	body := strings.NewReader(`{"address":"a:1","tag":"Backup box"}`)
+	rr := httptest.NewRecorder()
+	agentsHandler(rr, httptest.NewRequest(http.MethodPut, "/api/agents", body))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("PUT code = %d, want 204, body=%s", rr.Code, rr.Body.String())
+	}
+	if got := agentStore.Tag("a:1"); got != "Backup box" {
+		t.Errorf("tag = %q, want %q", got, "Backup box")
+	}
+}
+
+func TestAgentsHandlerPutUnknownAddress(t *testing.T) {
+	agentStore = newTestAgentStore(t)
+
+	body := strings.NewReader(`{"address":"missing:1","tag":"x"}`)
+	rr := httptest.NewRecorder()
+	agentsHandler(rr, httptest.NewRequest(http.MethodPut, "/api/agents", body))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("PUT unknown address code = %d, want 404", rr.Code)
+	}
+}
+
+func TestAgentsHandlerDeleteRemovesAgent(t *testing.T) {
+	agentStore = newTestAgentStore(t, "a:1")
+
+	rr := httptest.NewRecorder()
+	agentsHandler(rr, httptest.NewRequest(http.MethodDelete, "/api/agents?address=a:1", nil))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("DELETE code = %d, want 204, body=%s", rr.Code, rr.Body.String())
+	}
+	if agentStore.Has("a:1") {
+		t.Error("agent should be gone from the store after DELETE")
+	}
+}
+
+func TestAgentsHandlerDeleteUnknownAddress(t *testing.T) {
+	agentStore = newTestAgentStore(t)
+
+	rr := httptest.NewRecorder()
+	agentsHandler(rr, httptest.NewRequest(http.MethodDelete, "/api/agents?address=missing:1", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("DELETE unknown address code = %d, want 404", rr.Code)
+	}
+}
+
+func TestAgentsHandlerMethodNotAllowed(t *testing.T) {
+	agentStore = newTestAgentStore(t)
+
+	rr := httptest.NewRecorder()
+	agentsHandler(rr, httptest.NewRequest(http.MethodPatch, "/api/agents", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("PATCH code = %d, want 405", rr.Code)
+	}
+}
+
+func TestAgentsHandlerUnauthenticated(t *testing.T) {
+	store := auth.NewStore("$2a$10$dummy")
+	protected := store.RequireAPI(agentsHandler)
+
+	rr := httptest.NewRecorder()
+	protected(rr, httptest.NewRequest(http.MethodGet, "/api/agents", nil))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth agents = %d, want 401", rr.Code)
 	}
 }
 
