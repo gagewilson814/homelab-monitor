@@ -9,7 +9,7 @@
  *     versions and claims the client so the new shell serves immediately.
  */
 
-const CACHE_VERSION = "v3";
+const CACHE_VERSION = "v4";
 const SHELL_CACHE = CACHE_VERSION + ":shell";
 const API_CACHE = CACHE_VERSION + ":api";
 

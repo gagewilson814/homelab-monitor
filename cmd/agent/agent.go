@@ -137,11 +137,18 @@ func getUptime() uint64 {
 
 // getCPUUsage returns instantaneous CPU utilization as a percentage. The
 // Percent call with a 0 duration samples the running load across all cores;
-// the result comes back as a slice (one entry per core) so we take [0].
+// the result comes back as a slice (one entry per core) so we take [0]. The
+// length check matters: gopsutil can return an empty slice with a nil error
+// (e.g. when the platform reports no CPU times), and indexing that would
+// panic the whole agent rather than degrading to 0 like every other metric.
 func getCPUUsage() float64 {
 	cpuUsage, err := cpu.Percent(0, false)
 	if err != nil {
 		log.Println("Error getting CPU usage: ", err)
+		return 0.0
+	}
+	if len(cpuUsage) == 0 {
+		log.Println("No CPU usage samples returned")
 		return 0.0
 	}
 	return cpuUsage[0]
@@ -179,6 +186,17 @@ func main() {
 		log.Println("Checking services:", configuredServices)
 	}
 	http.HandleFunc("/stats", homeHandler)
+
+	// Explicit timeouts; the zero-value http.Server has none, so a stalled
+	// client would tie up a goroutine for as long as it likes.
+	srv := &http.Server{
+		Addr:              ":" + port,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
 	log.Println("Server starting on :" + port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	log.Fatal(srv.ListenAndServe())
 }

@@ -3,7 +3,9 @@ package agentstore
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestLoadSeedsFromDefaultsOnFirstRun(t *testing.T) {
@@ -91,6 +93,55 @@ func TestSetTagUpdatesExistingAgent(t *testing.T) {
 
 	if err := s.SetTag("missing:1", "x"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("SetTag on missing address = %v, want ErrNotFound", err)
+	}
+}
+
+func TestAddRejectsNonNumericPort(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agents.json")
+	s, err := Load(path, nil)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// net.SplitHostPort accepts all of these, so validateAddress has to do
+	// the numeric check itself - otherwise a path/query smuggled into the
+	// "port" would end up in the URL the backend builds for /stats.
+	for _, addr := range []string{
+		"host:not-a-port",
+		"example.com:80/admin?x=y",
+		"host:0",
+		"host:70000",
+		"host:-1",
+	} {
+		if _, err := s.Add(addr, ""); err == nil {
+			t.Errorf("Add(%q) should have been rejected", addr)
+		}
+	}
+
+	if _, err := s.Add("host:65535", ""); err != nil {
+		t.Errorf("Add(host:65535) should be accepted, got %v", err)
+	}
+}
+
+func TestTagTruncationKeepsValidUTF8(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agents.json")
+	s, err := Load(path, []string{"host:1"})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	// Multi-byte runes straddling the cap must not be sliced in half.
+	tag := strings.Repeat("é", maxTagLength+10)
+	if err := s.SetTag("host:1", tag); err != nil {
+		t.Fatalf("SetTag: %v", err)
+	}
+
+	got := s.Tag("host:1")
+	if !utf8.ValidString(got) {
+		t.Errorf("truncated tag is not valid UTF-8: %q", got)
+	}
+	if n := utf8.RuneCountInString(got); n != maxTagLength {
+		t.Errorf("truncated tag = %d runes, want %d", n, maxTagLength)
 	}
 }
 

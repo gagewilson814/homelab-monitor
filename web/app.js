@@ -43,10 +43,19 @@ function formatLastSeen(iso) {
 // Escape text for safe interpolation into innerHTML. Only actually needed
 // for user-entered fields (currently just the tag), but cheap enough to
 // apply everywhere it's used.
+//
+// Quotes matter as much as angle brackets here: several call sites
+// interpolate into a double-quoted attribute (data-*, aria-label), where an
+// unescaped " lets a value close the attribute and inject new ones - an
+// event handler included. The textContent/innerHTML trick escapes & < >
+// but NOT quotes, so this does the replacement explicitly.
 function escapeHtml(str) {
-  const div = document.createElement("div");
-  div.textContent = str;
-  return div.innerHTML;
+  return String(str ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 // Map a percentage to a CSS class that colors its bar: green default,
@@ -93,11 +102,13 @@ function metricRow(label, pct, history) {
     </div>`;
 }
 
-// Build one service-check row (name + up/down dot) for a card.
+// Build one service-check row (name + up/down dot) for a card. The name
+// comes straight from the polled agent, so it's untrusted input as far as
+// this dashboard is concerned - escape it.
 function serviceRow(svc) {
   return `
     <div class="metric">
-      <span class="service-name"><span class="dot${svc.up ? "" : " bad"}"></span>${svc.name}</span>
+      <span class="service-name"><span class="dot${svc.up ? "" : " bad"}"></span>${escapeHtml(svc.name)}</span>
       <span>${svc.up ? "up" : "down"}</span>
     </div>`;
 }
@@ -211,13 +222,16 @@ function formatSince(iso) {
   return formatLastSeen(iso);
 }
 
+// An alert message is composed server-side from the agent's hostname and
+// service names, so it carries untrusted content through to the DOM and has
+// to be escaped like any other agent-supplied string.
 function renderAlert(alert) {
   const icon = ALERT_ICON[alert.type] || "•";
   return `
-    <li class="alert-item alert-${alert.type}">
+    <li class="alert-item alert-${escapeHtml(alert.type)}">
       <span class="alert-icon">${icon}</span>
       <span class="alert-body">
-        <span class="alert-message">${alert.message}</span>
+        <span class="alert-message">${escapeHtml(alert.message)}</span>
         <span class="alert-since">since ${formatSince(alert.since)}</span>
       </span>
     </li>`;

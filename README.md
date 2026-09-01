@@ -110,7 +110,7 @@ The same debounced alerting also covers sustained resource usage — an agent wh
 
 ### Managing agents
 
-Add, remove, and tag agents from the dashboard itself instead of editing env vars — tap the blue **+** on the Overview tab to add one by `host:port` (with an optional tag, e.g. "Plex server"), or tap a card's edit (✎) icon to rename its tag or remove it. Changes persist immediately to `HOMELAB_AGENTS_FILE` and survive both a logout and a backend restart; polling picks up an added/removed agent on its next cycle (within one `HOMELAB_POLL_INTERVAL`), while a tag edit shows up on the very next dashboard refresh.
+Add, remove, and tag agents from the dashboard itself instead of editing env vars — tap the blue **+** on the Overview tab to add one by `host:port` (the port must be a number from 1–65535), with an optional tag, e.g. "Plex server" — or tap a card's edit (✎) icon to rename its tag or remove it. Changes persist immediately to `HOMELAB_AGENTS_FILE` and survive both a logout and a backend restart; polling picks up an added/removed agent on its next cycle (within one `HOMELAB_POLL_INTERVAL`), while a tag edit shows up on the very next dashboard refresh.
 
 The same is available directly via the API (`POST`/`PUT`/`DELETE /api/agents`, all requiring the session cookie) if you'd rather script it:
 
@@ -156,11 +156,11 @@ Tests use the standard library `testing` framework with `net/http/httptest` fake
 
 | Package | What's tested |
 |---------|---------------|
-| `internal/auth` | login/logout flow, bad password, missing hash |
+| `internal/auth` | login/logout flow, bad password, missing hash, oversized body, logout method |
 | `internal/stats` | `stats()` response shape + JSON wire format |
-| `internal/notify` | Discord `Send` is a no-op when the webhook is unset; error on a bad status |
-| `internal/alert` | debounce thresholds, online/offline transitions |
-| `internal/agentstore` | persisted agent CRUD, address validation, atomic writes surviving a reload |
+| `internal/notify` | Discord `Send` is a no-op when the webhook is unset; error on a bad status; errors don't leak the webhook token |
+| `internal/alert` | debounce thresholds, online/offline transitions, forgetting a removed agent |
+| `internal/agentstore` | persisted agent CRUD, address validation, UTF-8-safe tag limits, atomic writes surviving a reload |
 | `cmd/backend` | `poll`/`pollAll` error handling, alert transitions, threshold alerts, last-seen tracking, fleet/alerts/agents handlers + auth gate, agent-list parsing |
 
 Everything runs on the same platform you build on. The `gopsutil`-based stats tests only cover the host they run on, but the backend and agent logic is platform-independent.

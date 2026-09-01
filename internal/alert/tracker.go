@@ -3,6 +3,7 @@
 package alert
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -74,6 +75,22 @@ func (t *Tracker) Observe(address string, online bool) string {
 		return "online"
 	}
 	return "offline"
+}
+
+// Forget drops all debounce state for address (and, via the prefix form
+// used for per-service and per-metric keys, everything scoped under it), so
+// an agent that is removed and later re-added starts from a clean baseline
+// instead of inheriting the state it had when it left.
+func (t *Tracker) Forget(address string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	delete(t.state, address)
+	for key := range t.state {
+		if strings.HasPrefix(key, address+"/") {
+			delete(t.state, key)
+		}
+	}
 }
 
 // Confirmed returns the last confirmed state for address and the time it

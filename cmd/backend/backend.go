@@ -35,6 +35,10 @@ var serverAddresses = getServerAddresses(os.Getenv("HOMELAB_AGENTS"))
 // and read/written by agentsHandler in response to dashboard edits.
 var agentStore *agentstore.Store
 
+// maxBodyBytes caps how much of a JSON request body the agents API will
+// read, so a malformed or hostile client can't force a huge allocation.
+const maxBodyBytes = 64 << 10
+
 // getAgentsFile reads HOMELAB_AGENTS_FILE, the JSON file that persists the
 // monitored agent list (address + tag) across restarts, defaulting to
 // data/agents.json under the working directory.
@@ -186,6 +190,27 @@ func appendCapped(s []float64, v float64) []float64 {
 		s = s[len(s)-maxHistoryPoints:]
 	}
 	return s
+}
+
+// forgetAgent drops every piece of per-agent state the backend accumulates
+// outside agentStore. Without this, removing an agent and later re-adding
+// the same address would resurrect its old sparkline history, a stale
+// "last seen" from its previous life, and its previous alert state - all
+// presented as if they belonged to the freshly-added agent.
+func forgetAgent(address string) {
+	hostnameMu.Lock()
+	delete(hostnameCache, address)
+	hostnameMu.Unlock()
+
+	lastSeenMu.Lock()
+	delete(lastSeenCache, address)
+	lastSeenMu.Unlock()
+
+	historyMu.Lock()
+	delete(historyCache, address)
+	historyMu.Unlock()
+
+	alertTracker.Forget(address)
 }
 
 // annotateHistory stamps every result with its updated metric history. Must
@@ -432,7 +457,7 @@ func agentsHandler(w http.ResponseWriter, r *http.Request) {
 			Address string `json:"address"`
 			Tag     string `json:"tag"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&body); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
@@ -453,7 +478,7 @@ func agentsHandler(w http.ResponseWriter, r *http.Request) {
 			Address string `json:"address"`
 			Tag     string `json:"tag"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&body); err != nil {
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
@@ -477,6 +502,7 @@ func agentsHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), status)
 			return
 		}
+		forgetAgent(address)
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
@@ -652,8 +678,20 @@ func main() {
 	alertsCache = checkAlerts(fleetCache)
 	go pollLoop(pollInterval)
 
+	// Explicit timeouts: the zero-value http.Server has none, so a client
+	// that opens a connection and then stalls mid-request holds a goroutine
+	// (and its memory) indefinitely.
+	srv := &http.Server{
+		Addr:              ":9090",
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+
 	log.Println("Backend starting on :9090")
-	log.Fatal(http.ListenAndServe(":9090", mux))
+	log.Fatal(srv.ListenAndServe())
 }
 
 func serveFile(path string) http.HandlerFunc {

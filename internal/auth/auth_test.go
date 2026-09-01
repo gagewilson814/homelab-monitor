@@ -83,6 +83,57 @@ func TestLoginRejectsWrongMethod(t *testing.T) {
 	}
 }
 
+func TestLoginRejectsOversizedBody(t *testing.T) {
+	s := newTestStore(t)
+
+	// Without a cap, an unauthenticated caller could force an allocation as
+	// large as they cared to send.
+	huge := `{"password":"` + strings.Repeat("a", maxBodyBytes+1024) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(huge))
+	rr := httptest.NewRecorder()
+	s.LoginHandler(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("oversized login body: code=%d, want 400", rr.Code)
+	}
+}
+
+func TestLogoutRejectsNonPost(t *testing.T) {
+	s := newTestStore(t)
+
+	// A GET logout would be reachable by cross-site top-level navigation,
+	// which SameSite=Lax still attaches the session cookie to.
+	req := httptest.NewRequest(http.MethodGet, "/api/logout", nil)
+	rr := httptest.NewRecorder()
+	s.LogoutHandler(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("logout GET: code=%d, want 405", rr.Code)
+	}
+}
+
+func TestLogoutRevokesSession(t *testing.T) {
+	s := newTestStore(t)
+	rr := login(t, s, "secret")
+	var cookie *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == cookieName {
+			cookie = c
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/logout", nil)
+	req.AddCookie(cookie)
+	rr2 := httptest.NewRecorder()
+	s.LogoutHandler(rr2, req)
+
+	if rr2.Code != http.StatusNoContent {
+		t.Fatalf("logout POST: code=%d, want 204", rr2.Code)
+	}
+	if s.valid(cookie.Value) {
+		t.Fatal("session should not validate after logout")
+	}
+}
+
 func TestValidTokenRoundTrips(t *testing.T) {
 	s := newTestStore(t)
 	rr := login(t, s, "secret")

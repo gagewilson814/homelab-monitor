@@ -53,6 +53,33 @@ func TestTracker(t *testing.T) {
 	}
 }
 
+func TestTrackerForgetClearsAddressAndItsScopedKeys(t *testing.T) {
+	tr := NewTracker(1)
+
+	// Host state plus the per-service and per-metric keys scoped under it,
+	// which is how the backend names them.
+	tr.Observe("agent1", false)
+	tr.Observe("agent1/plex", false)
+	tr.Observe("agent1/cpu", false)
+	tr.Observe("agent2", false)
+
+	tr.Forget("agent1")
+
+	for _, key := range []string{"agent1", "agent1/plex", "agent1/cpu"} {
+		if _, _, ok := tr.Confirmed(key); ok {
+			t.Errorf("Confirmed(%q) still present after Forget", key)
+		}
+	}
+	// An unrelated agent must be untouched, and re-observing a forgotten
+	// address must start a fresh baseline (no transition reported).
+	if _, _, ok := tr.Confirmed("agent2"); !ok {
+		t.Error("Forget(agent1) should not have touched agent2")
+	}
+	if got := tr.Observe("agent1", true); got != "" {
+		t.Errorf("re-observing a forgotten address = %q, want a fresh baseline", got)
+	}
+}
+
 func TestTrackerIndependentAddresses(t *testing.T) {
 	tr := NewTracker(1)
 

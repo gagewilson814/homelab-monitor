@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -61,5 +62,20 @@ func TestDiscordReturnsErrorOnHTTPFailure(t *testing.T) {
 	d := NewDiscord("http://127.0.0.1:1/")
 	if err := d.Send("unreachable"); err == nil {
 		t.Fatal("expected a transport error for an unreachable webhook")
+	}
+}
+
+// A webhook URL is itself the credential, and net/http's *url.Error embeds
+// the full URL in its message - which the backend then writes to the log.
+func TestDiscordErrorDoesNotLeakWebhookURL(t *testing.T) {
+	const secret = "s3cret-webhook-token"
+	d := NewDiscord("http://127.0.0.1:1/api/webhooks/12345/" + secret)
+
+	err := d.Send("unreachable")
+	if err == nil {
+		t.Fatal("expected a transport error for an unreachable webhook")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error leaks the webhook token: %q", err.Error())
 	}
 }

@@ -4,8 +4,10 @@ package notify
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -43,7 +45,14 @@ func (d *Discord) Send(content string) error {
 
 	resp, err := d.client.Post(d.webhookURL, "application/json", bytes.NewReader(body))
 	if err != nil {
-		return err
+		// net/http wraps failures in *url.Error, whose Error() embeds the
+		// full URL - and a Discord webhook URL is itself the credential.
+		// Callers log this error, so unwrap to keep the token out of logs.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			return fmt.Errorf("discord webhook request failed: %w", urlErr.Err)
+		}
+		return fmt.Errorf("discord webhook request failed")
 	}
 	defer resp.Body.Close()
 

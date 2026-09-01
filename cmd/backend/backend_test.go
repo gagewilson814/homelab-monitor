@@ -636,6 +636,46 @@ func TestAgentsHandlerDeleteRemovesAgent(t *testing.T) {
 	}
 }
 
+func TestAgentsHandlerDeleteClearsPerAgentState(t *testing.T) {
+	fa := newFakeAgent(t, "node1")
+	installTestState(t, fa)
+	addr := fa.address()
+
+	// Build up the state a live agent accumulates: hostname, last-seen,
+	// sparkline history and debounce state.
+	results := []AgentResponse{{Address: addr, Data: &stats.Response{Hostname: "node1", CPUUsage: 12}}}
+	annotateLastSeen(results)
+	annotateHistory(results)
+	_ = withRecordingNotifier(t, func() { checkAlerts(results) })
+
+	if _, ok := lookupLastSeen(addr); !ok {
+		t.Fatal("precondition: expected last-seen to be recorded")
+	}
+
+	rr := httptest.NewRecorder()
+	agentsHandler(rr, httptest.NewRequest(http.MethodDelete, "/api/agents?address="+addr, nil))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("DELETE code = %d, want 204", rr.Code)
+	}
+
+	// Re-adding the same address must not inherit the old agent's data.
+	if got := lookupHostname(addr); got != "" {
+		t.Errorf("hostname cache still holds %q after removal", got)
+	}
+	if _, ok := lookupLastSeen(addr); ok {
+		t.Error("last-seen cache still holds an entry after removal")
+	}
+	historyMu.Lock()
+	_, hasHistory := historyCache[addr]
+	historyMu.Unlock()
+	if hasHistory {
+		t.Error("history cache still holds an entry after removal")
+	}
+	if _, _, ok := alertTracker.Confirmed(addr); ok {
+		t.Error("alert tracker still holds state after removal")
+	}
+}
+
 func TestAgentsHandlerDeleteUnknownAddress(t *testing.T) {
 	agentStore = newTestAgentStore(t)
 

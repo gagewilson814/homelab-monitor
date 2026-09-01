@@ -12,8 +12,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // Agent is one monitored host: its poll address and an optional
@@ -231,16 +233,25 @@ func (s *Store) persist() error {
 	return os.Rename(tmpPath, s.path)
 }
 
+// normalizeTag trims a tag and caps its length. The cap counts runes, not
+// bytes: slicing a string at a byte offset can cut a multi-byte character
+// in half, leaving invalid UTF-8 that json.Marshal silently rewrites to
+// U+FFFD - i.e. a tag with an emoji or an accent could come back corrupted.
 func normalizeTag(tag string) string {
 	tag = strings.TrimSpace(tag)
-	if len(tag) > maxTagLength {
-		tag = tag[:maxTagLength]
+	if utf8.RuneCountInString(tag) > maxTagLength {
+		tag = string([]rune(tag)[:maxTagLength])
 	}
 	return tag
 }
 
-// validateAddress requires a non-empty host:port pair - the same shape
-// poll() already assumes when it does "http://" + address + "/stats".
+// validateAddress requires a non-empty host:port pair with a numeric port -
+// the same shape poll() assumes when it does "http://" + address + "/stats".
+//
+// net.SplitHostPort alone is not enough: it is purely syntactic and happily
+// accepts "host:80/admin?x=y" as port "80/admin?x=y", which would smuggle a
+// path and query into the URL the backend builds. Requiring a real port
+// number keeps an address to exactly the host and port it claims to be.
 func validateAddress(address string) error {
 	if address == "" {
 		return fmt.Errorf("address is required")
@@ -251,6 +262,10 @@ func validateAddress(address string) error {
 	}
 	if host == "" || port == "" {
 		return fmt.Errorf("address must be host:port")
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("port must be a number between 1 and 65535, got %q", port)
 	}
 	return nil
 }

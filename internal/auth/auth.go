@@ -14,6 +14,12 @@ import (
 const (
 	cookieName = "session"
 	sessionTTL = 24 * time.Hour
+
+	// maxBodyBytes caps how much of a request body the JSON decoder will
+	// read. /api/login is reachable without a session, so without a cap
+	// anyone who can reach the port could force a multi-gigabyte allocation
+	// by posting one enormous "password" string.
+	maxBodyBytes = 64 << 10
 )
 
 // Store holds the single-user password hash and active sessions in memory.
@@ -84,7 +90,7 @@ func (s *Store) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req loginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -111,7 +117,15 @@ func (s *Store) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// LogoutHandler revokes the caller's session. It requires POST so a
+// cross-site top-level navigation (which SameSite=Lax would still attach
+// the cookie to) can't sign the user out.
 func (s *Store) LogoutHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
 	if cookie, err := r.Cookie(cookieName); err == nil {
 		s.revoke(cookie.Value)
 	}
