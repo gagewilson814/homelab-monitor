@@ -3,7 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0a0e18">
 <title>Homelab Monitor</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -18,6 +21,17 @@
 </header>
 <!-- Each agent renders as a card below; populated by app.js. -->
 <main id="fleet" class="fleet"></main>
+<script>
+  // Register the service worker for offline/installable support. No-op on
+  // browsers without SW support; only takes effect over HTTPS or localhost.
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("/sw.js").catch(function (err) {
+        console.debug("Service worker registration failed:", err);
+      });
+    });
+  }
+</script>
 <script src="app.js"></script>
 </body>
 </html>

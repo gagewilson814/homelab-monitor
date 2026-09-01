@@ -1,0 +1,19 @@
+{
+  "name": "Homelab Monitor",
+  "short_name": "Homelab Monitor",
+  "description": "Self-hosted monitoring dashboard for your home server fleet.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#05070c",
+  "theme_color": "#0a0e18",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
