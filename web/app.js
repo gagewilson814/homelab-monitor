@@ -37,6 +37,15 @@ function metricRow(label, pct) {
     </div>`;
 }
 
+// Build one service-check row (name + up/down dot) for a card.
+function serviceRow(svc) {
+  return `
+    <div class="metric">
+      <span class="service-name"><span class="dot${svc.up ? "" : " bad"}"></span>${svc.name}</span>
+      <span>${svc.up ? "up" : "down"}</span>
+    </div>`;
+}
+
 // Render a single agent card. Offline agents (with an error) get a distinct
 // "offline" styling and show the failure reason; healthy agents render
 // their hostname and metric rows.
@@ -50,6 +59,7 @@ function renderCard(agent) {
   }
 
   const d = agent.data;
+  const services = (d.services || []).map(serviceRow).join("");
   return `
     <div class="card">
       <h2><span class="dot"></span>${d.hostname}</h2>
@@ -58,6 +68,7 @@ function renderCard(agent) {
       ${metricRow("Disk", d.disk_usage)}
       <div class="metric"><span>Uptime</span><span>${formatUptime(d.uptime)}</span></div>
       <div class="metric"><span>Address</span><span>${agent.address}</span></div>
+      ${services}
     </div>`;
 }
 

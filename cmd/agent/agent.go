@@ -6,9 +6,15 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
 
 	"homeserver-monitor/internal/stats"
 
@@ -17,6 +23,81 @@ import (
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/mem"
 )
+
+// configuredServices lists which local services to check alongside the
+// standard host metrics. Parsed once at startup from HOMELAB_SERVICES.
+var configuredServices = getConfiguredServices()
+
+type serviceConfig struct {
+	Name string
+	Port int
+}
+
+// getConfiguredServices parses HOMELAB_SERVICES as comma-separated
+// name:port pairs (e.g. "jellyfin:8096,plex:32400"). Malformed entries are
+// skipped with a log line rather than failing startup.
+func getConfiguredServices() []serviceConfig {
+	env := os.Getenv("HOMELAB_SERVICES")
+	if env == "" {
+		return nil
+	}
+
+	var services []serviceConfig
+	for _, entry := range strings.Split(env, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+
+		name, portStr, found := strings.Cut(entry, ":")
+		if !found {
+			log.Printf("Skipping invalid HOMELAB_SERVICES entry %q: expected name:port", entry)
+			continue
+		}
+
+		port, err := strconv.Atoi(strings.TrimSpace(portStr))
+		if err != nil {
+			log.Printf("Skipping invalid HOMELAB_SERVICES entry %q: %v", entry, err)
+			continue
+		}
+
+		services = append(services, serviceConfig{Name: strings.TrimSpace(name), Port: port})
+	}
+	return services
+}
+
+// checkService dials the service's port on localhost with a short timeout.
+// A successful TCP connect counts as "up" without inspecting the payload,
+// which keeps this generic across arbitrary services.
+func checkService(svc serviceConfig) stats.ServiceStatus {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", svc.Port), 2*time.Second)
+	if err != nil {
+		return stats.ServiceStatus{Name: svc.Name, Port: svc.Port, Up: false}
+	}
+	conn.Close()
+	return stats.ServiceStatus{Name: svc.Name, Port: svc.Port, Up: true}
+}
+
+// checkServices runs every configured check concurrently, one goroutine per
+// service, mirroring the Backend's own polling pattern.
+func checkServices(services []serviceConfig) []stats.ServiceStatus {
+	if len(services) == 0 {
+		return nil
+	}
+
+	results := make([]stats.ServiceStatus, len(services))
+	var wg sync.WaitGroup
+	for i, svc := range services {
+		wg.Add(1)
+		go func(i int, svc serviceConfig) {
+			defer wg.Done()
+			results[i] = checkService(svc)
+		}(i, svc)
+	}
+	wg.Wait()
+
+	return results
+}
 
 func getHostname() string {
 	hostname, err := os.Hostname()
@@ -77,6 +158,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 		MemoryUsage: getMemoryUsage(),
 		DiskUsage:   getDiskUsage(),
 		Uptime:      getUptime(),
+		Services:    checkServices(configuredServices),
 	}
 	log.Println("Sending response:")
 	log.Println(response)
@@ -92,6 +174,9 @@ func main() {
 	port := os.Getenv("AGENT_PORT")
 	if port == "" {
 		port = "8080"
+	}
+	if len(configuredServices) > 0 {
+		log.Println("Checking services:", configuredServices)
 	}
 	http.HandleFunc("/stats", homeHandler)
 	log.Println("Server starting on :" + port)

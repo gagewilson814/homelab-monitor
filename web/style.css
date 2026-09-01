@@ -145,6 +145,13 @@ h1 { font-size: 1.25rem; margin: 0; letter-spacing: 0.01em; }
 }
 
 .card.offline .dot { background: var(--bad); }
+.dot.bad { background: var(--bad); }
+
+.service-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
 
 .metric {
   display: flex;

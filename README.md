@@ -10,9 +10,9 @@ Most existing monitoring tools are either overkill for a home lab or don't suppo
 
 ## Architecture
 
-- **Agent** (Go) — runs on each monitored machine. Exposes a `/stats` HTTP endpoint that returns hostname, CPU usage, memory usage, disk usage, and uptime as JSON. Uses [`gopsutil`](https://github.com/shirou/gopsutil) for cross-platform system metrics, and compiles to a single static binary for both Linux and Windows.
-- **Backend** (Go) — a central service running on the home network that polls all Agents concurrently (one goroutine per agent, pull model — no NAT/port-forwarding complexity since everything stays on the home network or a VPN), aggregates the results, and exposes them as JSON at `/api/fleet`. Also serves the static frontend.
-- **Frontend** — a minimal vanilla JS/HTML/CSS dashboard served by the Backend. Polls `/api/fleet` every 5s and renders live per-agent stat cards, including agents that are unreachable. Gated behind a login page; no database yet — see Roadmap.
+- **Agent** (Go) — runs on each monitored machine. Exposes a `/stats` HTTP endpoint that returns hostname, CPU usage, memory usage, disk usage, and uptime as JSON, plus the up/down status of any locally-configured services (see `HOMELAB_SERVICES` below). Uses [`gopsutil`](https://github.com/shirou/gopsutil) for cross-platform system metrics, and compiles to a single static binary for both Linux and Windows.
+- **Backend** (Go) — a central service running on the home network that polls all Agents concurrently on its own background schedule (one goroutine per agent, pull model — no NAT/port-forwarding complexity since everything stays on the home network or a VPN), aggregates the results into an in-memory cache, and serves that cache as JSON at `/api/fleet`. Polling and Discord alerting run independently of whether anyone has the dashboard open. Also serves the static frontend.
+- **Frontend** — a minimal vanilla JS/HTML/CSS dashboard served by the Backend. Polls `/api/fleet` every 5s (a fast read of the Backend's cache, not a live agent scrape) and renders live per-agent stat cards, including agents that are unreachable. Gated behind a login page; no database yet — see Roadmap.
 
 ```
 [ Agent : Linux server ]  \
@@ -57,9 +57,17 @@ Once running, the Agent serves stats at:
 GET http://<agent-host>:<port>/stats
 ```
 
+To also check that specific services are answering on that machine (not just that the host itself is up), set `HOMELAB_SERVICES` to a comma-separated list of `name:port` pairs:
+
+```bash
+HOMELAB_SERVICES='jellyfin:8096,plex:32400' go run ./cmd/agent
+```
+
+Each check is a plain TCP dial to `localhost:<port>` — it confirms something is listening, not that the service is actually healthy. Results show up in the Agent's `/stats` response as a `services` array (`{"name": "jellyfin", "port": 8096, "up": true}`), render on the dashboard card, and get their own debounced Discord alert independent of the host-level up/down alert — a hung Jellyfin on an otherwise-healthy host now shows up.
+
 ### Backend + Dashboard
 
-The backend must be run from the repo root (it serves the `web/` directory) or run through the go tool below. It polls agents listed in the comma-separated `HOMELAB_AGENTS` env var (defaults to `localhost:8080,localhost:8081`).
+The backend must be run from the repo root (it serves the `web/` directory) or run through the go tool below. It polls agents listed in the comma-separated `HOMELAB_AGENTS` env var (defaults to `localhost:8080,localhost:8081`) on its own background schedule, every `HOMELAB_POLL_INTERVAL` seconds (default `5`) — this runs continuously regardless of whether the dashboard is open, so alerting stays live even if nobody's looking at it.
 
 The dashboard and `/api/fleet` require a login. Set `HOMELAB_PASSWORD_HASH` to a bcrypt hash of your chosen password — the backend refuses to start without it. Generate one with the bundled `hashpw` tool:
 
@@ -88,7 +96,7 @@ Aggregated JSON is also available directly at `http://localhost:9090/api/fleet` 
 
 ### Discord alerts (optional)
 
-Set `DISCORD_WEBHOOK_URL` to get a Discord message whenever an agent's online/offline state changes (e.g. a server dropping off the network). Alerts are debounced — an agent has to return the same result for `DISCORD_ALERT_THRESHOLD` consecutive polls (default `2`, so ~10s at the dashboard's 5s refresh interval) before a transition is confirmed, so a single dropped poll won't page you. Leave `DISCORD_WEBHOOK_URL` unset to disable alerting entirely.
+Set `DISCORD_WEBHOOK_URL` to get a Discord message whenever an agent's online/offline state changes (e.g. a server dropping off the network). Alerts are debounced — an agent has to return the same result for `DISCORD_ALERT_THRESHOLD` consecutive background polls (default `2`, so ~10s at the default 5s poll interval) before a transition is confirmed, so a single dropped poll won't page you. Leave `DISCORD_WEBHOOK_URL` unset to disable alerting entirely.
 
 ```bash
 HOMELAB_PASSWORD_HASH='$2a$10$...' \
@@ -106,10 +114,11 @@ go run ./cmd/backend
 - [x] Minimal read-only web dashboard (no SQL yet)
 - [x] Single-user session-cookie authentication for the dashboard/API (non-negotiable before restart ships)
 - [x] Discord alerts on agent online/offline transitions (debounced)
-- [ ] Remote restart capability
+- [x] Backend polls on its own background schedule, independent of the dashboard being open
+- [x] Service-level checks (e.g. is Jellyfin's port actually answering, not just the host)
+- [ ] Remote restart capability (deprioritized for now)
 - [ ] SQL-backed dashboard with user login
 - [ ] Mobile-friendly / installable (PWA) dashboard access
-- [ ] Service-level checks (e.g. is Jellyfin's port actually answering, not just the host)
 - [ ] Threshold alerts (sustained high CPU/mem, disk nearing full)
 - [ ] "Last seen" timestamp per agent on the dashboard
 - [ ] Agents run as a system service (systemd/Windows service) so they survive a reboot unattended
