@@ -104,6 +104,20 @@ DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...' \
 go run ./cmd/backend
 ```
 
+The same debounced alerting also covers sustained resource usage — an agent whose CPU, memory, or disk stays above `HOMELAB_CPU_THRESHOLD` / `HOMELAB_MEM_THRESHOLD` / `HOMELAB_DISK_THRESHOLD` (each default `90`%) for `DISCORD_ALERT_THRESHOLD` consecutive polls fires an alert, and another when it recovers.
+
+### Last seen
+
+Every fleet entry carries a `last_seen` timestamp — the last time that agent was successfully polled. It's tracked automatically (no config needed) and persists through an outage, so an offline card shows *when* it went down instead of just that it's down.
+
+### Installable dashboard (PWA)
+
+The dashboard is installable — most browsers offer an "Install" / "Add to Home Screen" prompt once you've logged in. A service worker caches the static app shell so a refresh works even with a flaky connection, and falls back to the last-known fleet data if `/api/fleet` is briefly unreachable.
+
+### Running as a service
+
+See [`deploy/README.md`](deploy/README.md) for systemd unit files (Linux) and a Windows service note, so the Agent/Backend survive a reboot without a terminal left open.
+
 ## Testing
 
 Tests use the standard library `testing` framework with `net/http/httptest` fakes wherever a live dependency would be needed (a fake Agent server and a recording Discord notifier), so the whole suite runs with no network access:
@@ -125,7 +139,7 @@ Tests use the standard library `testing` framework with `net/http/httptest` fake
 | `internal/stats` | `stats()` response shape + JSON wire format |
 | `internal/notify` | Discord `Send` is a no-op when the webhook is unset; error on a bad status |
 | `internal/alert` | debounce thresholds, online/offline transitions |
-| `cmd/backend` | `poll`/`pollAll` error handling, alert transitions, fleet handler + auth gate, agent-list parsing |
+| `cmd/backend` | `poll`/`pollAll` error handling, alert transitions, threshold alerts, last-seen tracking, fleet handler + auth gate, agent-list parsing |
 
 Everything runs on the same platform you build on. The `gopsutil`-based stats tests only cover the host they run on, but the backend and agent logic is platform-independent.
 
@@ -138,6 +152,9 @@ Everything runs on the same platform you build on. The `gopsutil`-based stats te
 | `HOMELAB_POLL_INTERVAL` | backend poll cadence, in seconds | `5` |
 | `DISCORD_WEBHOOK_URL` | Discord webhook for online/offline alerts (optional) | unset = no alerts |
 | `DISCORD_ALERT_THRESHOLD` | consecutive polls to confirm a transition | `2` |
+| `HOMELAB_CPU_THRESHOLD` | CPU usage % that triggers a threshold alert | `90` |
+| `HOMELAB_MEM_THRESHOLD` | memory usage % that triggers a threshold alert | `90` |
+| `HOMELAB_DISK_THRESHOLD` | disk usage % that triggers a threshold alert | `90` |
 
 ## Roadmap
 
@@ -151,12 +168,12 @@ Everything runs on the same platform you build on. The `gopsutil`-based stats te
 - [x] Discord alerts on agent online/offline transitions (debounced)
 - [x] Backend polls on its own background schedule, independent of the dashboard being open
 - [x] Service-level checks (e.g. is Jellyfin's port actually answering, not just the host)
+- [x] Mobile-friendly / installable (PWA) dashboard access
+- [x] Threshold alerts (sustained high CPU/mem, disk nearing full)
+- [x] "Last seen" timestamp per agent on the dashboard
+- [x] Agents run as a system service (systemd/Windows service) so they survive a reboot unattended
 - [ ] Remote restart capability (deprioritized for now)
 - [ ] SQL-backed dashboard with user login
-- [ ] Mobile-friendly / installable (PWA) dashboard access
-- [ ] Threshold alerts (sustained high CPU/mem, disk nearing full)
-- [ ] "Last seen" timestamp per agent on the dashboard
-- [ ] Agents run as a system service (systemd/Windows service) so they survive a reboot unattended
 
 ## License
 
