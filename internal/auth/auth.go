@@ -53,6 +53,9 @@ func (s *Store) create() (string, error) {
 func (s *Store) valid(token string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.sessions == nil {
+		return false
+	}
 	expiry, ok := s.sessions[token]
 	if !ok {
 		return false
