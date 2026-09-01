@@ -12,6 +12,13 @@ import (
 // Discord posts messages to a Discord webhook. A zero-value webhookURL
 // makes Send a no-op, so notifications are simply disabled when unconfigured
 // rather than requiring a feature flag.
+// Notifier is the interface the backend depends on for sending alerts. It is
+// satisfied by *Discord and by test doubles, which is what lets alert paths
+// be exercised without a real webhook.
+type Notifier interface {
+	Send(content string) error
+}
+
 type Discord struct {
 	webhookURL string
 	client     *http.Client

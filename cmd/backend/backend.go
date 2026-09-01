@@ -20,12 +20,17 @@ import (
 	"time"
 )
 
-var serverAddresses = getServerAddresses()
+var serverAddresses = getServerAddresses(os.Getenv("HOMELAB_AGENTS"))
 
 // discordNotifier sends the up/down alerts. Its webhook URL is optional -
 // an empty DISCORD_WEBHOOK_URL just makes Send a no-op, so alerting is
 // silently disabled rather than requiring its own feature flag.
-var discordNotifier = notify.NewDiscord(os.Getenv("DISCORD_WEBHOOK_URL"))
+// discordNotifier sends the up/down alerts. Its webhook URL is optional -
+// an empty DISCORD_WEBHOOK_URL just makes Send a no-op, so alerting is
+// silently disabled rather than requiring its own feature flag. Declared as
+// the Notifier interface (not the concrete *Discord) so tests can swap in a
+// recording double.
+var discordNotifier notify.Notifier = notify.NewDiscord(os.Getenv("DISCORD_WEBHOOK_URL"))
 
 // alertTracker debounces poll results so a single dropped poll doesn't fire
 // a notification; see getAlertThreshold for how many consecutive results in
@@ -78,8 +83,11 @@ func getPollInterval() time.Duration {
 	return 5 * time.Second
 }
 
-func getServerAddresses() []string {
-	if env := os.Getenv("HOMELAB_AGENTS"); env != "" {
+// getServerAddresses parses the comma-separated HOMELAB_AGENTS env var into a
+// list of host:port addresses, trimming whitespace and dropping empties. A
+// single parameter (rather than os.Getenv inside) keeps it unit-testable.
+func getServerAddresses(env string) []string {
+	if env != "" {
 		var addresses []string
 		for _, addr := range strings.Split(env, ",") {
 			addr = strings.TrimSpace(addr)
@@ -234,6 +242,10 @@ func checkAlerts(results []AgentResponse) {
 
 // sendAlert sends a Discord message in its own goroutine, so a slow or
 // unreachable webhook never delays the polling loop.
+// sendAlert posts a human-readable up/down alert to Discord. It is
+// fire-and-forget: the notification is dispatched asynchronously and callers
+// get no signal about when (or whether) it completes, which is all the
+// production path needs.
 func sendAlert(message string) {
 	go func() {
 		if err := discordNotifier.Send(message); err != nil {
