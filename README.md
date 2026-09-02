@@ -116,7 +116,7 @@ For any service you've configured with `HOMELAB_SERVICES`, you can also give the
 
 ```bash
 HOMELAB_SERVICES='jellyfin:8096,p9k:32400' \
-HOMELAB_ACTIONS='jellyfin:curl -X POST http://localhost:8096/healthcheck,p9k:docker restart p9k' \
+HOMELAB_ACTIONS='jellyfin:systemctl restart jellyfin,p9k:docker restart p9k' \
 go run ./cmd/agent
 ```
 
@@ -126,6 +126,8 @@ When a service has an action configured, its row on the dashboard card gets a **
 curl -b cookies.txt -X POST localhost:9090/api/agents/192.168.1.12:8080/restart \
   -d '{"service":"jellyfin"}'
 ```
+
+If the request fails, the status code tells you which side to look at: `503 "agent offline - no recent poll data"` means the backend hasn't had a successful poll from that agent (connectivity or token problem), while `400 "no restart action configured for service"` means the agent answered but has no `HOMELAB_ACTIONS` entry for that service name.
 
 The command runs **on the agent machine** — where the service lives — as whatever user the agent process runs as. It is your own config on your own machine, so it's your responsibility to make it safe (e.g. prefer `systemctl restart jellyfin` over hand-rolled kill logic, and don't put anything in an action you wouldn't run yourself at 3am).
 
