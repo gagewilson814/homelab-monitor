@@ -1053,27 +1053,34 @@ func TestRestartAgentHandlerOfflineAgent(t *testing.T) {
 }
 
 func TestSeedUserCreatesLoginableAccount(t *testing.T) {
-	store := newTestAuthStore(t)
+	fresh, err := auth.Open(filepath.Join(t.TempDir(), "auth.db"))
+	if err != nil {
+		t.Fatalf("open fresh store: %v", err)
+	}
+	defer fresh.Close()
 
-	// seedUser over an already-seeded store still creates additional users
-	// if called directly, but runSeed refuses that - the guard lives in the
-	// store's Seed and runSeed's UserCount check, both covered in
-	// internal/auth. Here we verify the backend helper validates input.
-	if _, err := seedUser(store, "", "pw"); err == nil {
+	// seedUser validates input before touching the store...
+	if _, err := seedUser(fresh, "", "pw"); err == nil {
 		t.Error("seedUser accepted an empty username")
 	}
-	if _, err := seedUser(store, "ops", ""); err == nil {
+	if _, err := seedUser(fresh, "ops", ""); err == nil {
 		t.Error("seedUser accepted an empty password")
 	}
 
-	u, err := seedUser(store, "ops", "hunter2")
+	// ...and creates the account through Store.Seed, so a populated
+	// database is refused rather than silently getting a second admin.
+	u, err := seedUser(fresh, "ops", "hunter2")
 	if err != nil {
-		t.Fatalf("seedUser: %v", err)
+		t.Fatalf("seedUser on fresh db: %v", err)
 	}
 	if u.Username != "ops" {
 		t.Errorf("created user = %+v, want username ops", u)
 	}
-	found, ok, err := store.FindUserByUsername("ops")
+	if _, err := seedUser(fresh, "intruder", "pw2"); err != auth.ErrAlreadySeeded {
+		t.Fatalf("seedUser on seeded db err = %v, want auth.ErrAlreadySeeded", err)
+	}
+
+	found, ok, err := fresh.FindUserByUsername("ops")
 	if err != nil || !ok {
 		t.Fatalf("FindUserByUsername: ok=%v err=%v", ok, err)
 	}

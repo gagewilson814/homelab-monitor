@@ -108,7 +108,7 @@ go run ./cmd/backend seed
 # Created user "admin". Log in at http://localhost:9090/
 ```
 
-The database lives at `HOMELAB_DB_FILE` (default `data/homelab.db`) and is created on first run. Seeding is a one-time bootstrap: re-running `seed` against a populated database errors out with "already seeded - delete the DB file and re-run seed to start over", so a re-run can't quietly mint an extra admin.
+The database lives at `HOMELAB_DB_FILE` (default `data/homelab.db`) and is created on first run. Seeding is a one-time bootstrap: re-running `seed` against a populated database errors out with "<dbpath> already has a user - delete the DB file and re-run seed to start over", so a re-run can't quietly mint an extra admin.
 
 Logging in and out happens in the dashboard: the login page takes **username and password** (a refresh of the login page while already logged in shows "Logged in as …" and a logout button instead of the form), and the dashboard header shows the current user next to the status pill. Sessions are opaque tokens stored server-side, so **logging out revokes just that session** and everything survives a backend restart. The same flow is scriptable:
 

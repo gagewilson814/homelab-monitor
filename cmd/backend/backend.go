@@ -801,7 +801,8 @@ func getDBFile(env string) string {
 
 // runSeed bootstraps the first dashboard user: creates/opens the SQLite DB,
 // prompts for a username and password on stdin, and inserts the account.
-// It refuses to run twice so a re-run can't quietly mint an extra admin.
+// The double-seed guard lives in auth.Store.Seed (one source of truth);
+// this just maps its ErrAlreadySeeded to a CLI-friendly message.
 func runSeed() {
 	dbFile := getDBFile(os.Getenv("HOMELAB_DB_FILE"))
 	store, err := auth.Open(dbFile)
@@ -809,12 +810,6 @@ func runSeed() {
 		log.Fatal(err)
 	}
 	defer store.Close()
-
-	if n, err := store.UserCount(); err != nil {
-		log.Fatal(err)
-	} else if n > 0 {
-		log.Fatalf("%s already has a user - delete the DB file and re-run seed to start over", dbFile)
-	}
 
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Print("Admin username: ")
@@ -829,14 +824,17 @@ func runSeed() {
 	}
 
 	user, err := seedUser(store, strings.TrimSpace(username), strings.TrimRight(password, "\r\n"))
-	if err != nil {
+	if errors.Is(err, auth.ErrAlreadySeeded) {
+		log.Fatalf("%s already has a user - delete the DB file and re-run seed to start over", dbFile)
+	} else if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Created user %q. Log in at http://localhost:9090/\n", user.Username)
 }
 
-// seedUser validates the prompted values and creates the account; split
-// from runSeed so tests can exercise it without a TTY.
+// seedUser validates the prompted values and creates the account via
+// Store.Seed (which refuses to run on a populated database); split from
+// runSeed so tests can exercise it without a TTY.
 func seedUser(store *auth.Store, username, password string) (*auth.User, error) {
 	if username == "" {
 		return nil, errors.New("username is required")
@@ -844,7 +842,7 @@ func seedUser(store *auth.Store, username, password string) (*auth.User, error) 
 	if password == "" {
 		return nil, errors.New("password is required")
 	}
-	return store.CreateUserFromPassword(username, password)
+	return store.Seed(username, password)
 }
 
 // runServer is the normal backend: opens the auth DB, wires the routes, and
