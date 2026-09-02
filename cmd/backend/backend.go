@@ -441,24 +441,34 @@ func restartAgentURL(address string) string {
 	return "http://" + address + "/restart"
 }
 
+// lastPoll returns the most recent cached poll result for address, or nil
+// if the agent has never reported in (offline, unauthorized, or brand new).
+func lastPoll(address string) *stats.Response {
+	fleetCacheMu.RLock()
+	results := fleetCache
+	fleetCacheMu.RUnlock()
+
+	for _, res := range results {
+		if res.Address == address {
+			return res.Data
+		}
+	}
+	return nil
+}
+
 // lookupRestartAction finds the restart command last advertised for service
 // on address in the cached fleet poll, so the request body sent to the
 // agent echoes agent-published config. The agent itself re-validates the
 // service against its own configured actions and never executes a command
 // it receives over the wire.
 func lookupRestartAction(address, service string) (string, bool) {
-	fleetCacheMu.RLock()
-	results := fleetCache
-	fleetCacheMu.RUnlock()
-
-	for _, res := range results {
-		if res.Address != address || res.Data == nil {
-			continue
-		}
-		for _, svc := range res.Data.Services {
-			if svc.Name == service && svc.Action != "" {
-				return svc.Action, true
-			}
+	data := lastPoll(address)
+	if data == nil {
+		return "", false
+	}
+	for _, svc := range data.Services {
+		if svc.Name == service && svc.Action != "" {
+			return svc.Action, true
 		}
 	}
 	return "", false
@@ -498,10 +508,22 @@ func restartAgentHandler(w http.ResponseWriter, r *http.Request) {
 
 	command, ok := lookupRestartAction(address, service)
 	if !ok {
+		// Distinguish "we've never heard from this agent" (connectivity or
+		// auth problem) from "the agent didn't advertise a restart action
+		// for this service" (configuration), so the error tells the operator
+		// which of the two to go fix.
+		if lastPoll(address) == nil {
+			http.Error(w, "agent offline - no recent poll data", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "no restart action configured for service", http.StatusBadRequest)
 		return
 	}
 
+	// "command" is an echo of the agent's own published config, sent for
+	// observability only: the agent decodes just the service name and
+	// re-validates it against HOMELAB_ACTIONS, never executing a command it
+	// receives over the wire.
 	payload, err := json.Marshal(map[string]string{"service": service, "command": command})
 	if err != nil {
 		http.Error(w, "failed to encode request", http.StatusInternalServerError)

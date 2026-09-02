@@ -1016,3 +1016,22 @@ func TestLookupRestartAction(t *testing.T) {
 		t.Error("lookupRestartAction matched the wrong agent address")
 	}
 }
+
+func TestRestartAgentHandlerOfflineAgent(t *testing.T) {
+	// An agent the store knows about but that has no poll data (never
+	// reported, or failing auth): restart must fail with a connectivity
+	// error, not a config error, and never reach the agent.
+	agentStore = newTestAgentStore(t, "offline:1")
+	fleetCacheMu.Lock()
+	fleetCache = nil
+	fleetCacheMu.Unlock()
+
+	rr := serveRestart(t, httptest.NewRequest(http.MethodPost,
+		"/api/agents/offline:1/restart", strings.NewReader(`{"service":"plex"}`)))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("offline agent code = %d, want 503, body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "agent offline") {
+		t.Errorf("body = %s, want an agent-offline message", rr.Body.String())
+	}
+}
