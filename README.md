@@ -254,6 +254,7 @@ Everything runs on the same platform you build on. The `gopsutil`-based stats te
 
 | Env var | Purpose | Default |
 |---------|---------|---------|
+| `HOMELAB_PORT` | backend listen address (host:port); overridable so multiple instances (dev/test) can run side by side without port collisions | `:9090` |
 | `HOMELAB_DB_FILE` | SQLite database file for users/sessions; created by the seed command (replaces the old `HOMELAB_PASSWORD_HASH` - see [Multi-user auth (SQL)](#multi-user-auth-sql)) | `data/homelab.db` |
 | `HOMELAB_AGENTS` | comma-separated `host:port` agents to poll - only used to seed `HOMELAB_AGENTS_FILE` the first time it doesn't exist | `localhost:8080,localhost:8081` |
 | `HOMELAB_AGENTS_FILE` | JSON file persisting the agent list/tags managed from the dashboard | `data/agents.json` |

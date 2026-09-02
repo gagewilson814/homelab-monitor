@@ -800,12 +800,28 @@ func getDBFile(env string) string {
 	return "data/homelab.db"
 }
 
+// getListenAddr reads HOMELAB_PORT, the backend's listen address, defaulting
+// to :9090. Both "9090" (bare port) and ":9090" (host:port) are accepted so
+// the env example and the default agree; anything already containing a colon
+// (e.g. "localhost:9090" or an IPv6 address) is passed through as-is.
+func getListenAddr(env string) string {
+	addr := strings.TrimSpace(env)
+	if addr == "" {
+		return ":9090"
+	}
+	if !strings.Contains(addr, ":") {
+		return ":" + addr
+	}
+	return addr
+}
+
 // runSeed bootstraps the first dashboard user: creates/opens the SQLite DB,
 // prompts for a username and password on stdin, and inserts the account.
 // The double-seed guard lives in auth.Store.Seed (one source of truth);
 // this just maps its ErrAlreadySeeded to a CLI-friendly message.
 func runSeed() {
 	dbFile := getDBFile(os.Getenv("HOMELAB_DB_FILE"))
+	listenAddr := getListenAddr(os.Getenv("HOMELAB_PORT"))
 	store, err := auth.Open(dbFile)
 	if err != nil {
 		log.Fatal(err)
@@ -830,7 +846,7 @@ func runSeed() {
 	} else if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Created user %q. Log in at http://localhost:9090/\n", user.Username)
+	fmt.Printf("Created user %q. Log in at http://localhost%s/\n", user.Username, listenAddr)
 }
 
 // seedUser validates the prompted values and creates the account via
@@ -849,6 +865,8 @@ func seedUser(store *auth.Store, username, password string) (*auth.User, error) 
 // runServer is the normal backend: opens the auth DB, wires the routes, and
 // serves the dashboard plus the JSON API.
 func runServer() {
+	listenAddr := getListenAddr(os.Getenv("HOMELAB_PORT"))
+
 	dbFile := getDBFile(os.Getenv("HOMELAB_DB_FILE"))
 	authStore, err := auth.Open(dbFile)
 	if err != nil {
@@ -922,7 +940,7 @@ func runServer() {
 	// that opens a connection and then stalls mid-request holds a goroutine
 	// (and its memory) indefinitely.
 	srv := &http.Server{
-		Addr:              ":9090",
+		Addr:              listenAddr,
 		Handler:           securityHeaders(mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -930,7 +948,7 @@ func runServer() {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	log.Println("Backend starting on :9090")
+	log.Println("Backend starting on", listenAddr)
 	log.Fatal(srv.ListenAndServe())
 }
 
