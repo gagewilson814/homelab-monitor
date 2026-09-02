@@ -36,9 +36,14 @@ open with `go run`.
    sudo chown homelab:homelab /etc/homelab-monitor/*.env
    ```
 
-   Edit `backend.env` and set `HOMELAB_PASSWORD_HASH` (generate one with
-   `go run ./cmd/hashpw`) - the backend won't start without it. Fill in
-   `HOMELAB_AGENTS` too, or it defaults to `localhost:8080,localhost:8081`.
+   Edit `backend.env` - set `HOMELAB_DB_FILE` if you don't want the default
+   `data/homelab.db` location, and fill in `HOMELAB_AGENTS` (or it defaults
+   to `localhost:8080,localhost:8081`). Then create the first dashboard user
+   (the backend refuses to start before this):
+
+   ```bash
+   sudo -u homelab /opt/homelab-monitor/backend seed
+   ```
 
 4. Install and start the unit(s):
 

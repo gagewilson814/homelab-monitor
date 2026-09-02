@@ -71,19 +71,20 @@ The backend must be run from the repo root (it serves the `web/` directory) or r
 
 The agent list itself is *not* fixed at startup: the comma-separated `HOMELAB_AGENTS` env var (defaults to `localhost:8080,localhost:8081`) only seeds it the first time the backend ever runs. From then on the list lives in `HOMELAB_AGENTS_FILE` (default `data/agents.json`, created automatically) and is managed from the dashboard — see [Managing agents](#managing-agents) below. Changing `HOMELAB_AGENTS` after that file exists has no effect; edit or delete the file instead.
 
-The dashboard and `/api/fleet` require a login. Set `HOMELAB_PASSWORD_HASH` to a bcrypt hash of your chosen password — the backend refuses to start without it. Generate one with the bundled `hashpw` tool:
+The dashboard and `/api/fleet` require a login against user accounts stored in SQLite — see [Multi-user auth (SQL)](#multi-user-auth-sql) below. Create the first account with the seed command (the backend refuses to start until one exists):
 
 ```bash
-go run ./cmd/hashpw
+go run ./cmd/backend seed
+# Admin username: admin
 # Password: <type your password, Enter>
-# $2a$10$...
+# Created user "admin". Log in at http://localhost:9090/
 ```
 
-Then run the backend with that hash:
+Then run the backend:
 
 ```bash
 # run locally, override which agents to poll
-HOMELAB_PASSWORD_HASH='$2a$10$...' HOMELAB_AGENTS="192.168.1.10:8080,192.168.1.11:8080" go run ./cmd/backend
+HOMELAB_AGENTS="192.168.1.10:8080,192.168.1.11:8080" go run ./cmd/backend
 ```
 
 Then open the dashboard and log in:
@@ -92,7 +93,38 @@ Then open the dashboard and log in:
 http://localhost:9090/
 ```
 
-Sessions are cookie-based, last 24h, and are held in memory (a backend restart logs everyone out). By default agents aren't authenticated - they're only expected to be reachable from the home network/VPN, not the public internet. If the backend is reachable from further away than that (e.g. over Tailscale, not just physically at home), set `HOMELAB_AGENT_TOKEN` - see [Securing agent polling](#securing-agent-polling) below.
+Sessions are cookie-based (`homelab_session`, HttpOnly, SameSite=Lax) and last 24h; they're stored in the database, so they survive a backend restart. By default agents aren't authenticated - they're only expected to be reachable from the home network/VPN, not the public internet. If the backend is reachable from further away than that (e.g. over Tailscale, not just physically at home), set `HOMELAB_AGENT_TOKEN` - see [Securing agent polling](#securing-agent-polling) below.
+
+### Multi-user auth (SQL)
+
+Dashboard access is authenticated against SQLite-backed user accounts (via the pure-Go `modernc.org/sqlite` driver — no CGo, cross-compiles like everything else). This replaces the original single-user `HOMELAB_PASSWORD_HASH`: there is no longer a shared password, each account has its own username and bcrypt-hashed password.
+
+One-time setup — the backend refuses to start while the database has zero users:
+
+```bash
+go run ./cmd/backend seed
+# Admin username: admin
+# Password: <type your password, Enter>
+# Created user "admin". Log in at http://localhost:9090/
+```
+
+The database lives at `HOMELAB_DB_FILE` (default `data/homelab.db`) and is created on first run. Seeding is a one-time bootstrap: re-running `seed` against a populated database errors out with "already seeded - delete the DB file and re-run seed to start over", so a re-run can't quietly mint an extra admin.
+
+Logging in and out happens in the dashboard: the login page takes **username and password** (a refresh of the login page while already logged in shows "Logged in as …" and a logout button instead of the form), and the dashboard header shows the current user next to the status pill. Sessions are opaque tokens stored server-side, so **logging out revokes just that session** and everything survives a backend restart. The same flow is scriptable:
+
+```bash
+# log in (stores the session cookie in cookies.txt)
+curl -c cookies.txt -X POST localhost:9090/api/login \
+  -d '{"username":"admin","password":"..."}'
+
+# who am I
+curl -b cookies.txt localhost:9090/api/me
+
+# log out (revokes that session)
+curl -b cookies.txt -X POST localhost:9090/api/logout
+```
+
+The agent token gate (`HOMELAB_AGENT_TOKEN`) is unchanged and independent: it protects an agent's `/stats` and `/restart` endpoints from the network side, regardless of who's logged into the dashboard.
 
 Aggregated JSON is also available directly at `http://localhost:9090/api/fleet` (requires the same session cookie).
 
@@ -102,7 +134,7 @@ Set `HOMELAB_AGENT_TOKEN` to the same value on the backend *and* every agent tha
 
 ```bash
 # on the backend
-HOMELAB_PASSWORD_HASH='$2a$10$...' HOMELAB_AGENT_TOKEN='some-long-random-string' go run ./cmd/backend
+HOMELAB_AGENT_TOKEN='some-long-random-string' go run ./cmd/backend
 
 # on each agent
 HOMELAB_AGENT_TOKEN='some-long-random-string' go run ./cmd/agent
@@ -144,7 +176,6 @@ The security model, in order of what actually enforces it:
 Set `DISCORD_WEBHOOK_URL` to get a Discord message whenever an agent's online/offline state changes (e.g. a server dropping off the network). Alerts are debounced — an agent has to return the same result for `DISCORD_ALERT_THRESHOLD` consecutive background polls (default `2`, so ~10s at the default 5s poll interval) before a transition is confirmed, so a single dropped poll won't page you. Leave `DISCORD_WEBHOOK_URL` unset to disable alerting entirely.
 
 ```bash
-HOMELAB_PASSWORD_HASH='$2a$10$...' \
 DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...' \
 go run ./cmd/backend
 ```
@@ -212,7 +243,7 @@ Everything runs on the same platform you build on. The `gopsutil`-based stats te
 
 | Env var | Purpose | Default |
 |---------|---------|---------|
-| `HOMELAB_PASSWORD_HASH` | bcrypt hash of the dashboard/API password (required) | — |
+| `HOMELAB_DB_FILE` | SQLite database file for users/sessions; created by the seed command (replaces the old `HOMELAB_PASSWORD_HASH` - see [Multi-user auth (SQL)](#multi-user-auth-sql)) | `data/homelab.db` |
 | `HOMELAB_AGENTS` | comma-separated `host:port` agents to poll - only used to seed `HOMELAB_AGENTS_FILE` the first time it doesn't exist | `localhost:8080,localhost:8081` |
 | `HOMELAB_AGENTS_FILE` | JSON file persisting the agent list/tags managed from the dashboard | `data/agents.json` |
 | `HOMELAB_AGENT_TOKEN` | shared secret sent to (backend) / required by (agent) `/stats` - set identically on both sides; see [Securing agent polling](#securing-agent-polling) | unset = agents unauthenticated |
@@ -244,7 +275,7 @@ Everything runs on the same platform you build on. The `gopsutil`-based stats te
 - [x] Metric history sparklines, an aggregated alerts view, and mobile-first chrome (bottom nav, loading/error/empty states)
 - [x] Security hardening: strict CSP, optional agent shared-secret auth (`HOMELAB_AGENT_TOKEN`), Discord mentions suppressed
 - [x] Remote restart capability: per-service restart commands (`HOMELAB_ACTIONS`) triggered from the dashboard, run on the agent machine
-- [ ] SQL-backed dashboard with user login
+- [x] SQL-backed dashboard with user login: multi-user accounts (bcrypt) and persistent sessions in SQLite (`HOMELAB_DB_FILE`, `go run ./cmd/backend seed`)
 
 ## License
 

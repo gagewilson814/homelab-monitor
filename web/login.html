@@ -7,12 +7,22 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body class="login-body">
-<form id="login-form" class="login-card">
+<div class="login-card">
   <h1>Homelab Monitor</h1>
-  <input type="password" id="password" placeholder="Password" autocomplete="current-password" autofocus required>
-  <button type="submit">Log in</button>
+  <!-- Shown instead of the form when a valid session cookie already
+       exists (login.js checks /api/me on load), so refreshing the login
+       page while logged in doesn't look like a logout. -->
+  <div id="logged-in" hidden>
+    <p class="logged-in-text">Logged in as <strong id="logged-in-user"></strong></p>
+    <button id="logged-in-logout" type="button">Log out</button>
+  </div>
+  <form id="login-form">
+    <input type="text" id="username" placeholder="Username" autocomplete="username" autofocus required>
+    <input type="password" id="password" placeholder="Password" autocomplete="current-password" required>
+    <button type="submit">Log in</button>
+  </form>
   <div id="login-error" class="error-text"></div>
-</form>
+</div>
 <script src="login.js"></script>
 </body>
 </html>

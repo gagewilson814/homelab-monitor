@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -781,11 +782,88 @@ func sendAlert(message string) {
 }
 
 func main() {
-	passwordHash := os.Getenv("HOMELAB_PASSWORD_HASH")
-	if passwordHash == "" {
-		log.Fatal("HOMELAB_PASSWORD_HASH must be set (generate one with `go run ./cmd/hashpw`)")
+	if len(os.Args) > 1 && os.Args[1] == "seed" {
+		runSeed()
+		return
 	}
-	authStore := auth.NewStore(passwordHash)
+	runServer()
+}
+
+// getDBFile reads HOMELAB_DB_FILE, the SQLite database holding users and
+// sessions, defaulting to data/homelab.db - the same env-var-with-default
+// pattern as getAgentsFile.
+func getDBFile(env string) string {
+	if env != "" {
+		return env
+	}
+	return "data/homelab.db"
+}
+
+// runSeed bootstraps the first dashboard user: creates/opens the SQLite DB,
+// prompts for a username and password on stdin, and inserts the account.
+// It refuses to run twice so a re-run can't quietly mint an extra admin.
+func runSeed() {
+	dbFile := getDBFile(os.Getenv("HOMELAB_DB_FILE"))
+	store, err := auth.Open(dbFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer store.Close()
+
+	if n, err := store.UserCount(); err != nil {
+		log.Fatal(err)
+	} else if n > 0 {
+		log.Fatalf("%s already has a user - delete the DB file and re-run seed to start over", dbFile)
+	}
+
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Print("Admin username: ")
+	username, err := reader.ReadString('\n')
+	if err != nil {
+		log.Fatal("read username: ", err)
+	}
+	fmt.Print("Password: ")
+	password, err := reader.ReadString('\n')
+	if err != nil {
+		log.Fatal("read password: ", err)
+	}
+
+	user, err := seedUser(store, strings.TrimSpace(username), strings.TrimRight(password, "\r\n"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Created user %q. Log in at http://localhost:9090/\n", user.Username)
+}
+
+// seedUser validates the prompted values and creates the account; split
+// from runSeed so tests can exercise it without a TTY.
+func seedUser(store *auth.Store, username, password string) (*auth.User, error) {
+	if username == "" {
+		return nil, errors.New("username is required")
+	}
+	if password == "" {
+		return nil, errors.New("password is required")
+	}
+	return store.CreateUserFromPassword(username, password)
+}
+
+// runServer is the normal backend: opens the auth DB, wires the routes, and
+// serves the dashboard plus the JSON API.
+func runServer() {
+	dbFile := getDBFile(os.Getenv("HOMELAB_DB_FILE"))
+	authStore, err := auth.Open(dbFile)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer authStore.Close()
+
+	// An empty users table means nobody can log in - refuse to start rather
+	// than coming up as an unreachable dashboard.
+	if n, err := authStore.UserCount(); err != nil {
+		log.Fatal(err)
+	} else if n == 0 {
+		log.Fatal("no users yet - run `go run ./cmd/backend seed` to create one")
+	}
 
 	agentsFile := getAgentsFile(os.Getenv("HOMELAB_AGENTS_FILE"))
 	store, err := agentstore.Load(agentsFile, serverAddresses)
@@ -797,6 +875,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/login", authStore.LoginHandler)
 	mux.HandleFunc("/api/logout", authStore.LogoutHandler)
+	mux.HandleFunc("/api/me", authStore.RequireAPI(meHandler))
 	mux.HandleFunc("/api/fleet", authStore.RequireAPI(fleetHandler))
 	mux.HandleFunc("/api/alerts", authStore.RequireAPI(alertsHandler))
 	mux.HandleFunc("/api/agents", authStore.RequireAPI(agentsHandler))
@@ -848,6 +927,18 @@ func main() {
 
 	log.Println("Backend starting on :9090")
 	log.Fatal(srv.ListenAndServe())
+}
+
+// meHandler reports who's logged in - the dashboard fetches it once on
+// load to show "Logged in as <username>" in the header. RequireAPI has
+// already resolved the user into the request context.
+func meHandler(w http.ResponseWriter, r *http.Request) {
+	user, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	writeJSON(w, map[string]any{"id": user.ID, "username": user.Username})
 }
 
 func serveFile(path string) http.HandlerFunc {

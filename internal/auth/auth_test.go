@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -13,53 +14,86 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// newTestStore returns a Store whose password verifies against "secret".
+// newTestStore opens a fresh SQLite database in a temp directory and seeds
+// it with one user: admin / secret. Each test gets its own file, so tests
+// never see each other's rows.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	hash, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
+	s, err := Open(filepath.Join(t.TempDir(), "auth.db"))
 	if err != nil {
-		t.Fatalf("bcrypt.GenerateFromPassword: %v", err)
+		t.Fatalf("open test store: %v", err)
 	}
-	return NewStore(string(hash))
+	t.Cleanup(func() { s.Close() })
+
+	if _, err := s.Seed("admin", "secret"); err != nil {
+		t.Fatalf("seed test store: %v", err)
+	}
+	return s
 }
 
-func login(t *testing.T, s *Store, password string) *httptest.ResponseRecorder {
+func login(t *testing.T, s *Store, username, password string) *httptest.ResponseRecorder {
 	t.Helper()
-	body, _ := json.Marshal(map[string]string{"password": password})
+	body, _ := json.Marshal(map[string]string{"username": username, "password": password})
 	req := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(body))
 	rr := httptest.NewRecorder()
 	s.LoginHandler(rr, req)
 	return rr
 }
 
-func TestLoginAcceptsCorrectPassword(t *testing.T) {
+func sessionCookie(t *testing.T, rr *httptest.ResponseRecorder) *http.Cookie {
+	t.Helper()
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == cookieName {
+			return c
+		}
+	}
+	t.Fatal("expected a session cookie to be set")
+	return nil
+}
+
+func TestLoginAcceptsCorrectCredentials(t *testing.T) {
 	s := newTestStore(t)
-	rr := login(t, s, "secret")
+	rr := login(t, s, "admin", "secret")
 	if rr.Code != http.StatusNoContent {
 		t.Fatalf("login correct: code=%d, want 204", rr.Code)
 	}
-	cookies := rr.Result().Cookies()
-	var cookie *http.Cookie
-	for _, c := range cookies {
-		if c.Name == cookieName {
-			cookie = c
-		}
+	cookie := sessionCookie(t, rr)
+	if cookie.Value == "" {
+		t.Fatal("session cookie has no value")
 	}
-	if cookie == nil || cookie.Value == "" {
-		t.Fatal("expected a session cookie to be set")
+	if cookie.HttpOnly != true || cookie.SameSite != http.SameSiteLaxMode {
+		t.Errorf("cookie flags: HttpOnly=%v SameSite=%v, want HttpOnly=true SameSite=Lax", cookie.HttpOnly, cookie.SameSite)
 	}
 }
 
 func TestLoginRejectsWrongPassword(t *testing.T) {
 	s := newTestStore(t)
-	rr := login(t, s, "nope")
+	rr := login(t, s, "admin", "nope")
 	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("login wrong: code=%d, want 401", rr.Code)
+		t.Fatalf("login wrong password: code=%d, want 401", rr.Code)
 	}
-	for _, c := range rr.Result().Cookies() {
-		if c.Name == cookieName {
-			t.Fatal("no cookie should be set on failed login")
-		}
+	if len(rr.Result().Cookies()) != 0 {
+		t.Fatal("no cookie should be set on failed login")
+	}
+}
+
+func TestLoginRejectsUnknownUsername(t *testing.T) {
+	s := newTestStore(t)
+	// Same 401 as a wrong password, so usernames can't be enumerated.
+	rr := login(t, s, "nobody", "whatever")
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("login unknown user: code=%d, want 401", rr.Code)
+	}
+	if got := strings.TrimSpace(rr.Body.String()); got != "invalid credentials" {
+		t.Errorf("unknown-user body = %q, want the same as a wrong password", got)
+	}
+}
+
+func TestLoginRejectsEmptyUsername(t *testing.T) {
+	s := newTestStore(t)
+	rr := login(t, s, "", "secret")
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("login empty username: code=%d, want 401", rr.Code)
 	}
 }
 
@@ -88,7 +122,7 @@ func TestLoginRejectsOversizedBody(t *testing.T) {
 
 	// Without a cap, an unauthenticated caller could force an allocation as
 	// large as they cared to send.
-	huge := `{"password":"` + strings.Repeat("a", maxBodyBytes+1024) + `"}`
+	huge := `{"username":"admin","password":"` + strings.Repeat("a", maxBodyBytes+1024) + `"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(huge))
 	rr := httptest.NewRecorder()
 	s.LoginHandler(rr, req)
@@ -111,120 +145,199 @@ func TestLogoutRejectsNonPost(t *testing.T) {
 	}
 }
 
-func TestLogoutRevokesSession(t *testing.T) {
+func TestLogoutRevokesOnlyThatSession(t *testing.T) {
 	s := newTestStore(t)
-	rr := login(t, s, "secret")
-	var cookie *http.Cookie
-	for _, c := range rr.Result().Cookies() {
-		if c.Name == cookieName {
-			cookie = c
-		}
-	}
+
+	first := sessionCookie(t, login(t, s, "admin", "secret"))
+	second := sessionCookie(t, login(t, s, "admin", "secret"))
 
 	req := httptest.NewRequest(http.MethodPost, "/api/logout", nil)
-	req.AddCookie(cookie)
-	rr2 := httptest.NewRecorder()
-	s.LogoutHandler(rr2, req)
-
-	if rr2.Code != http.StatusNoContent {
-		t.Fatalf("logout POST: code=%d, want 204", rr2.Code)
-	}
-	if s.valid(cookie.Value) {
-		t.Fatal("session should not validate after logout")
-	}
-}
-
-func TestValidTokenRoundTrips(t *testing.T) {
-	s := newTestStore(t)
-	rr := login(t, s, "secret")
-	var cookie *http.Cookie
-	for _, c := range rr.Result().Cookies() {
-		if c.Name == cookieName {
-			cookie = c
-		}
-	}
-	if cookie == nil {
-		t.Fatal("expected a session cookie")
-	}
-	if !s.valid(cookie.Value) {
-		t.Fatal("token created by login should validate")
-	}
-}
-
-func TestRequireAPIBlocksUnauthenticated(t *testing.T) {
-	s := newTestStore(t)
-	req := httptest.NewRequest(http.MethodGet, "/api/fleet", nil)
+	req.AddCookie(first)
 	rr := httptest.NewRecorder()
-	s.RequireAPI(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})(rr, req)
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("unauth fleet: code=%d, want 401", rr.Code)
+	s.LogoutHandler(rr, req)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("logout POST: code=%d, want 204", rr.Code)
+	}
+
+	if _, found, _ := s.FindSession(first.Value); found {
+		t.Error("logged-out session still resolves")
+	}
+	if _, found, _ := s.FindSession(second.Value); !found {
+		t.Error("logout revoked a different session of the same user")
 	}
 }
 
-func TestRequireAPIAllowsAuthenticated(t *testing.T) {
+func TestSessionRoundTripsThroughLogin(t *testing.T) {
 	s := newTestStore(t)
-	rr := login(t, s, "secret")
-	var cookie *http.Cookie
-	for _, c := range rr.Result().Cookies() {
-		if c.Name == cookieName {
-			cookie = c
-		}
-	}
+	cookie := sessionCookie(t, login(t, s, "admin", "secret"))
 
-	handled := false
-	handler := func(w http.ResponseWriter, r *http.Request) {
-		handled = true
-		w.WriteHeader(http.StatusOK)
+	user, found, err := s.SessionUser(cookie.Value)
+	if err != nil || !found {
+		t.Fatalf("SessionUser: found=%v err=%v", found, err)
 	}
-	req := httptest.NewRequest(http.MethodGet, "/api/fleet", nil)
-	req.AddCookie(cookie)
-	// Fresh recorder: login already consumed the old one's header.
-	rr2 := httptest.NewRecorder()
-	s.RequireAPI(handler)(rr2, req)
-	if rr2.Code != http.StatusOK || !handled {
-		t.Fatalf("authed fleet: code=%d handled=%v, want 200 and inner handler to run", rr2.Code, handled)
+	if user.Username != "admin" {
+		t.Errorf("SessionUser username = %q, want admin", user.Username)
+	}
+	if len(user.Password) == 0 || string(user.Password) == "secret" {
+		t.Error("SessionUser must expose the stored hash, never the plaintext")
 	}
 }
 
 func TestSessionExpires(t *testing.T) {
-	// A token whose expiry is in the past must not validate.
 	s := newTestStore(t)
-	s.mu.Lock()
-	s.sessions["expired"] = time.Now().Add(-time.Hour)
-	s.mu.Unlock()
-	if s.valid("expired") {
-		t.Fatal("expired token should not validate")
+	token, err := s.CreateSession(1)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// Force the row into the past; FindSession treats expired as not-found
+	// and deletes the row so the table can't grow without bound.
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	if _, err := s.db.Exec(`UPDATE sessions SET expires_at = ? WHERE token = ?`, past, token); err != nil {
+		t.Fatalf("force expiry: %v", err)
+	}
+	if _, found, _ := s.FindSession(token); found {
+		t.Fatal("expired session should not resolve")
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE token = ?`, token).Scan(&n); err != nil {
+		t.Fatalf("count expired row: %v", err)
+	}
+	if n != 0 {
+		t.Fatal("expired session row was not deleted")
+	}
+}
+
+func TestSessionUserMissingUser(t *testing.T) {
+	s := newTestStore(t)
+
+	// A session whose user row vanished (user deleted out from under it)
+	// must not authenticate as anyone.
+	token, err := s.CreateSession(9999)
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if _, found, _ := s.SessionUser(token); found {
+		t.Fatal("session for a nonexistent user should not resolve")
 	}
 }
 
 func TestRevokeInvalidatesToken(t *testing.T) {
 	s := newTestStore(t)
-	rr := login(t, s, "secret")
-	var cookie *http.Cookie
-	for _, c := range rr.Result().Cookies() {
-		if c.Name == cookieName {
-			cookie = c
-		}
+	cookie := sessionCookie(t, login(t, s, "admin", "secret"))
+	user, _, _ := s.SessionUser(cookie.Value)
+
+	if err := s.RevokeSession(user.ID, cookie.Value); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
 	}
-	s.revoke(cookie.Value)
-	if s.valid(cookie.Value) {
-		t.Fatal("revoked token should not validate")
+	if _, found, _ := s.FindSession(cookie.Value); found {
+		t.Fatal("revoked token should not resolve")
+	}
+}
+
+func TestCreateUserFromPasswordStoresHashNotPlaintext(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "auth.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	if _, err := s.CreateUserFromPassword("ops", "hunter2"); err != nil {
+		t.Fatalf("CreateUserFromPassword: %v", err)
+	}
+
+	u, found, err := s.FindUserByUsername("ops")
+	if err != nil || !found {
+		t.Fatalf("FindUserByUsername: found=%v err=%v", found, err)
+	}
+	if string(u.Password) == "hunter2" {
+		t.Fatal("plaintext password stored in the database")
+	}
+	if err := bcrypt.CompareHashAndPassword(u.Password, []byte("hunter2")); err != nil {
+		t.Errorf("stored hash does not verify against the plaintext: %v", err)
+	}
+}
+
+func TestSeedOnlyWorksOnce(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "auth.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+
+	if _, err := s.Seed("admin", "first"); err != nil {
+		t.Fatalf("first Seed: %v", err)
+	}
+	if _, err := s.Seed("intruder", "second"); err == nil || (err != ErrAlreadySeeded) {
+		t.Fatalf("second Seed err = %v, want ErrAlreadySeeded", err)
+	}
+	if n, _ := s.UserCount(); n != 1 {
+		t.Fatalf("UserCount = %d, want 1 (second seed must not add a user)", n)
+	}
+}
+
+func TestOpenCreatesMissingTables(t *testing.T) {
+	s := newTestStore(t)
+	if n, err := s.UserCount(); err != nil || n != 1 {
+		t.Fatalf("UserCount = %d, %v; want 1 from the seeded user", n, err)
+	}
+}
+
+func TestRequireAPIExposesUser(t *testing.T) {
+	s := newTestStore(t)
+	cookie := sessionCookie(t, login(t, s, "admin", "secret"))
+
+	var got *User
+	handler := s.RequireAPI(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = UserFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/fleet", nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	handler(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("authed request: code=%d, want 200", rr.Code)
+	}
+	if got == nil || got.Username != "admin" {
+		t.Fatalf("context user = %+v, want the admin user", got)
+	}
+}
+
+func TestRequirePageRedirectsUnauthenticated(t *testing.T) {
+	s := newTestStore(t)
+	rr := httptest.NewRecorder()
+	s.RequirePage(http.NotFoundHandler()).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rr.Code != http.StatusFound {
+		t.Fatalf("unauth page: code=%d, want 302", rr.Code)
+	}
+	if loc := rr.Header().Get("Location"); loc != "/login.html" {
+		t.Errorf("redirect target = %q, want /login.html", loc)
 	}
 }
 
 func TestSessionsAreConcurrentSafe(t *testing.T) {
 	s := newTestStore(t)
+
+	// SQLite runs through one connection (see Open), but the Store must
+	// still behave under concurrent callers - the backend serves requests
+	// from multiple goroutines.
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 25; i++ {
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
-			token, _ := s.create()
-			s.valid(token)
-			s.revoke(token)
-		}(i)
+			token, err := s.CreateSession(1)
+			if err != nil {
+				t.Errorf("CreateSession: %v", err)
+				return
+			}
+			s.FindSession(token)
+			if user, found, err := s.SessionUser(token); err != nil || !found || user.Username != "admin" {
+				t.Errorf("SessionUser: found=%v err=%v", found, err)
+			}
+		}()
 	}
 	wg.Wait()
 }

@@ -236,6 +236,22 @@ h1 { font-size: 1.25rem; margin: 0; letter-spacing: 0.01em; }
 
 .login-card button:hover { background: var(--accent-hover); }
 
+.logged-in-text {
+  margin: 0;
+  text-align: center;
+  color: var(--text);
+  font-size: 0.9rem;
+}
+
+#logged-in-logout {
+  width: 100%;
+}
+
+.current-user {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .fleet {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));

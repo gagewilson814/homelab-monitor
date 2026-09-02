@@ -9,6 +9,7 @@ const errorBannerEl = document.getElementById("error-banner");
 const alertsListEl = document.getElementById("alerts-list");
 const alertsEmptyEl = document.getElementById("alerts-empty");
 const navAlertBadge = document.getElementById("nav-alert-badge");
+const currentUserEl = document.getElementById("current-user");
 
 // Last successfully-fetched fleet, kept on screen through a failed poll so
 // the dashboard never blanks out and reads as a crash.
@@ -637,6 +638,21 @@ restartCancelBtn.addEventListener("click", closeRestartModal);
 restartModal.addEventListener("click", (e) => {
   if (e.target === restartModal) closeRestartModal();
 });
+
+// Show who's logged in, from the auth store - RequireAPI guards the
+// endpoint, so a 401 here means the session died and refresh()'s own
+// redirect to the login page will handle it.
+(async function showCurrentUser() {
+  try {
+    const res = await fetch("/api/me");
+    if (!res.ok) return;
+    const me = await res.json();
+    currentUserEl.textContent = `Logged in as ${me.username}`;
+  } catch {
+    // Leave the label empty on network errors; the retry banner covers
+    // backend reachability.
+  }
+})();
 
 // Kick off the first load, then poll on the interval above.
 refresh();

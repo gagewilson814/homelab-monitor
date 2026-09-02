@@ -781,7 +781,7 @@ func TestAgentsHandlerMethodNotAllowed(t *testing.T) {
 }
 
 func TestAgentsHandlerUnauthenticated(t *testing.T) {
-	store := auth.NewStore("$2a$10$dummy")
+	store := newTestAuthStore(t)
 	protected := store.RequireAPI(agentsHandler)
 
 	rr := httptest.NewRecorder()
@@ -793,7 +793,7 @@ func TestAgentsHandlerUnauthenticated(t *testing.T) {
 
 func TestFleetHandlerUnauthenticated(t *testing.T) {
 	// RequireAPI gates fleetHandler; without a valid session it must 401.
-	store := auth.NewStore("$2a$10$dummy")
+	store := newTestAuthStore(t)
 	protected := store.RequireAPI(fleetHandler)
 
 	rr := httptest.NewRecorder()
@@ -801,6 +801,22 @@ func TestFleetHandlerUnauthenticated(t *testing.T) {
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("unauth fleet = %d, want 401", rr.Code)
 	}
+}
+
+// newTestAuthStore opens a fresh SQLite auth DB in a temp dir seeded with
+// an admin/secret user - the replacement for the old single-user hash in a
+// test double, exercising the real login path.
+func newTestAuthStore(t *testing.T) *auth.Store {
+	t.Helper()
+	store, err := auth.Open(filepath.Join(t.TempDir(), "auth.db"))
+	if err != nil {
+		t.Fatalf("open auth store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+	if _, err := store.Seed("admin", "secret"); err != nil {
+		t.Fatalf("seed auth store: %v", err)
+	}
+	return store
 }
 
 func TestGetServerAddressesParsing(t *testing.T) {
@@ -985,7 +1001,7 @@ func TestRestartAgentHandlerMethodNotAllowed(t *testing.T) {
 }
 
 func TestRestartAgentHandlerUnauthenticated(t *testing.T) {
-	store := auth.NewStore("$2a$10$dummy")
+	store := newTestAuthStore(t)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/agents/{id}/restart", store.RequireAPI(restartAgentHandler))
 
@@ -1033,5 +1049,124 @@ func TestRestartAgentHandlerOfflineAgent(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "agent offline") {
 		t.Errorf("body = %s, want an agent-offline message", rr.Body.String())
+	}
+}
+
+func TestSeedUserCreatesLoginableAccount(t *testing.T) {
+	store := newTestAuthStore(t)
+
+	// seedUser over an already-seeded store still creates additional users
+	// if called directly, but runSeed refuses that - the guard lives in the
+	// store's Seed and runSeed's UserCount check, both covered in
+	// internal/auth. Here we verify the backend helper validates input.
+	if _, err := seedUser(store, "", "pw"); err == nil {
+		t.Error("seedUser accepted an empty username")
+	}
+	if _, err := seedUser(store, "ops", ""); err == nil {
+		t.Error("seedUser accepted an empty password")
+	}
+
+	u, err := seedUser(store, "ops", "hunter2")
+	if err != nil {
+		t.Fatalf("seedUser: %v", err)
+	}
+	if u.Username != "ops" {
+		t.Errorf("created user = %+v, want username ops", u)
+	}
+	found, ok, err := store.FindUserByUsername("ops")
+	if err != nil || !ok {
+		t.Fatalf("FindUserByUsername: ok=%v err=%v", ok, err)
+	}
+	if string(found.Password) == "hunter2" {
+		t.Error("plaintext password reached the database")
+	}
+}
+
+func TestLoginLogoutFlowViaHandlers(t *testing.T) {
+	store := newTestAuthStore(t)
+
+	// Wrong password: 401, no cookie.
+	rr := httptest.NewRecorder()
+	store.LoginHandler(rr, httptest.NewRequest(http.MethodPost, "/api/login",
+		strings.NewReader(`{"username":"admin","password":"wrong"}`)))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("bad login code = %d, want 401", rr.Code)
+	}
+
+	// Correct login: 204 + cookie, then /api/me names the user.
+	rr = httptest.NewRecorder()
+	store.LoginHandler(rr, httptest.NewRequest(http.MethodPost, "/api/login",
+		strings.NewReader(`{"username":"admin","password":"secret"}`)))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("login code = %d, want 204", rr.Code)
+	}
+	cookie := rr.Result().Cookies()[0]
+
+	me := httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	me.AddCookie(cookie)
+	rr = httptest.NewRecorder()
+	store.RequireAPI(meHandler)(rr, me)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("me code = %d, want 200", rr.Code)
+	}
+	var got struct {
+		ID       int    `json:"id"`
+		Username string `json:"username"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode me: %v", err)
+	}
+	if got.Username != "admin" {
+		t.Errorf("me username = %q, want admin", got.Username)
+	}
+
+	// Logout revokes the session; the cookie stops working.
+	logout := httptest.NewRequest(http.MethodPost, "/api/logout", nil)
+	logout.AddCookie(cookie)
+	rr = httptest.NewRecorder()
+	store.LogoutHandler(rr, logout)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("logout code = %d, want 204", rr.Code)
+	}
+
+	me = httptest.NewRequest(http.MethodGet, "/api/me", nil)
+	me.AddCookie(cookie)
+	rr = httptest.NewRecorder()
+	store.RequireAPI(meHandler)(rr, me)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("me after logout code = %d, want 401", rr.Code)
+	}
+}
+
+func TestMeHandlerUnauthenticated(t *testing.T) {
+	store := newTestAuthStore(t)
+	rr := httptest.NewRecorder()
+	store.RequireAPI(meHandler)(rr, httptest.NewRequest(http.MethodGet, "/api/me", nil))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth me = %d, want 401", rr.Code)
+	}
+}
+
+func TestGetDBFile(t *testing.T) {
+	if got := getDBFile(""); got != "data/homelab.db" {
+		t.Errorf("getDBFile(\"\") = %q, want the default", got)
+	}
+	if got := getDBFile("/tmp/test.db"); got != "/tmp/test.db" {
+		t.Errorf("getDBFile override = %q, want the override", got)
+	}
+}
+
+func TestEmptyAuthDBReportsZeroUsers(t *testing.T) {
+	// The "backend refuses to start" guard keys off UserCount()==0 on a
+	// freshly created database - exercise that path here (runServer itself
+	// binds :9090, so the check stays inline there).
+	store, err := auth.Open(filepath.Join(t.TempDir(), "auth.db"))
+	if err != nil {
+		t.Fatalf("open empty auth db: %v", err)
+	}
+	defer store.Close()
+
+	if n, err := store.UserCount(); err != nil || n != 0 {
+		t.Fatalf("UserCount on fresh db = %d, %v; want 0", n, err)
 	}
 }
