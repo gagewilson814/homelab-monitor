@@ -25,12 +25,34 @@ type fakeAgent struct {
 	// failNext flips the agent into failure mode for one poll, to test that a
 	// bad agent is reported via Err rather than crashing the fleet.
 	failNext bool
+	// restarts records every service name a /restart request asked for, and
+	// restartToken captures the agent token header the backend sent.
+	restarts     chan string
+	restartToken string
+	// restartStatus/restartBody let a test script the agent's /restart reply.
+	restartStatus int
+	restartBody   string
 }
 
 func newFakeAgent(t *testing.T, hostname string) *fakeAgent {
 	t.Helper()
-	fa := &fakeAgent{}
+	fa := &fakeAgent{restarts: make(chan string, 16), restartStatus: http.StatusOK}
 	fa.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/restart" {
+			fa.restartToken = r.Header.Get(agentTokenHeader)
+			var body struct {
+				Service string `json:"service"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad body", http.StatusBadRequest)
+				return
+			}
+			fa.restarts <- body.Service
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(fa.restartStatus)
+			w.Write([]byte(fa.restartBody))
+			return
+		}
 		if r.URL.Path != "/stats" {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
@@ -46,7 +68,7 @@ func newFakeAgent(t *testing.T, hostname string) *fakeAgent {
 			MemoryUsage: 20.0,
 			DiskUsage:   30.0,
 			Uptime:      1234,
-			Services:    []stats.ServiceStatus{{Name: "plex", Port: 32400, Up: true}},
+			Services:    []stats.ServiceStatus{{Name: "plex", Port: 32400, Up: true, Action: "systemctl restart plex"}},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(payload); err != nil {
@@ -794,5 +816,203 @@ func TestGetServerAddressesParsing(t *testing.T) {
 		if fmt.Sprint(got) != fmt.Sprint(want) {
 			t.Errorf("getServerAddresses(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// serveRestart routes through a real ServeMux so the {id} path value the
+// handler reads via r.PathValue is populated exactly as in production.
+func serveRestart(t *testing.T, req *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/agents/{id}/restart", restartAgentHandler)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	return rr
+}
+
+// seedRestartState installs a fake agent in the store and seeds fleetCache
+// with a fresh poll (which now carries the plex Action), so
+// lookupRestartAction finds a configured command.
+func seedRestartState(t *testing.T, fa *fakeAgent) {
+	t.Helper()
+	installTestState(t, fa)
+	good := poll(fa.address())
+	fleetCacheMu.Lock()
+	fleetCache = []AgentResponse{good}
+	fleetCacheMu.Unlock()
+}
+
+func TestRestartAgentHandlerRelaysToAgent(t *testing.T) {
+	fa := newFakeAgent(t, "node1")
+	seedRestartState(t, fa)
+	fa.restartBody = `{"service":"plex","status":"ok","output":"restarted"}`
+
+	rr := serveRestart(t, httptest.NewRequest(http.MethodPost,
+		"/api/agents/"+url.PathEscape(fa.address())+"/restart",
+		strings.NewReader(`{"service":"plex"}`)))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("restart code = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+	// The agent must have received exactly the requested service name...
+	select {
+	case got := <-fa.restarts:
+		if got != "plex" {
+			t.Errorf("agent saw service %q, want plex", got)
+		}
+	default:
+		t.Fatal("agent never received a /restart request")
+	}
+	// ...and its JSON body must be relayed verbatim to the caller.
+	var relayed struct {
+		Service string `json:"service"`
+		Status  string `json:"status"`
+		Output  string `json:"output"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&relayed); err != nil {
+		t.Fatalf("decode relayed body: %v", err)
+	}
+	if relayed.Service != "plex" || relayed.Status != "ok" || relayed.Output != "restarted" {
+		t.Errorf("relayed response = %+v", relayed)
+	}
+}
+
+func TestRestartAgentHandlerSendsAgentTokenWhenConfigured(t *testing.T) {
+	fa := newFakeAgent(t, "node1")
+	seedRestartState(t, fa)
+	fa.restartBody = `{}`
+
+	orig := agentToken
+	agentToken = "s3cret"
+	defer func() { agentToken = orig }()
+
+	rr := serveRestart(t, httptest.NewRequest(http.MethodPost,
+		"/api/agents/"+url.PathEscape(fa.address())+"/restart",
+		strings.NewReader(`{"service":"plex"}`)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("restart code = %d, want 200, body=%s", rr.Code, rr.Body.String())
+	}
+	if fa.restartToken != "s3cret" {
+		t.Errorf("agent saw token %q, want s3cret", fa.restartToken)
+	}
+}
+
+func TestRestartAgentHandlerUnknownAgent(t *testing.T) {
+	fa := newFakeAgent(t, "node1")
+	seedRestartState(t, fa)
+
+	rr := serveRestart(t, httptest.NewRequest(http.MethodPost,
+		"/api/agents/missing:1/restart", strings.NewReader(`{"service":"plex"}`)))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("unknown agent code = %d, want 404", rr.Code)
+	}
+}
+
+func TestRestartAgentHandlerServiceWithoutAction(t *testing.T) {
+	fa := newFakeAgent(t, "node1")
+	seedRestartState(t, fa)
+
+	// The agent advertises plex only; anything else has no configured
+	// command and must be refused before ever reaching the agent.
+	rr := serveRestart(t, httptest.NewRequest(http.MethodPost,
+		"/api/agents/"+url.PathEscape(fa.address())+"/restart",
+		strings.NewReader(`{"service":"unconfigured"}`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("unconfigured service code = %d, want 400", rr.Code)
+	}
+	select {
+	case got := <-fa.restarts:
+		t.Errorf("agent unexpectedly received restart for %q", got)
+	default:
+	}
+}
+
+func TestRestartAgentHandlerRequiresService(t *testing.T) {
+	fa := newFakeAgent(t, "node1")
+	seedRestartState(t, fa)
+
+	rr := serveRestart(t, httptest.NewRequest(http.MethodPost,
+		"/api/agents/"+url.PathEscape(fa.address())+"/restart",
+		strings.NewReader(`{"service":"  "}`)))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("empty service code = %d, want 400", rr.Code)
+	}
+}
+
+func TestRestartAgentHandlerRelaysAgentFailure(t *testing.T) {
+	fa := newFakeAgent(t, "node1")
+	seedRestartState(t, fa)
+	fa.restartStatus = http.StatusInternalServerError
+	fa.restartBody = `{"service":"plex","status":"error","output":"job failed"}`
+
+	rr := serveRestart(t, httptest.NewRequest(http.MethodPost,
+		"/api/agents/"+url.PathEscape(fa.address())+"/restart",
+		strings.NewReader(`{"service":"plex"}`)))
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("relayed failure code = %d, want 500", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), `"status":"error"`) {
+		t.Errorf("relayed body = %s, want the agent's error JSON", rr.Body.String())
+	}
+}
+
+func TestRestartAgentHandlerUnreachableAgent(t *testing.T) {
+	// A stored agent that isn't answering: the backend reports a gateway
+	// failure rather than hanging or panicking.
+	agentStore = newTestAgentStore(t, "127.0.0.1:1")
+	fleetCacheMu.Lock()
+	fleetCache = []AgentResponse{{
+		Address: "127.0.0.1:1",
+		Data:    &stats.Response{Hostname: "dead", Services: []stats.ServiceStatus{{Name: "plex", Action: "true"}}},
+	}}
+	fleetCacheMu.Unlock()
+
+	rr := serveRestart(t, httptest.NewRequest(http.MethodPost,
+		"/api/agents/127.0.0.1:1/restart", strings.NewReader(`{"service":"plex"}`)))
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("unreachable agent code = %d, want 502, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRestartAgentHandlerMethodNotAllowed(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/agents/{id}/restart", restartAgentHandler)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/agents/a:1/restart", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET code = %d, want 405", rr.Code)
+	}
+}
+
+func TestRestartAgentHandlerUnauthenticated(t *testing.T) {
+	store := auth.NewStore("$2a$10$dummy")
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/agents/{id}/restart", store.RequireAPI(restartAgentHandler))
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/agents/a:1/restart", strings.NewReader(`{"service":"plex"}`)))
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unauth restart = %d, want 401", rr.Code)
+	}
+}
+
+func TestRestartAgentURL(t *testing.T) {
+	if got := restartAgentURL("192.168.1.10:8080"); got != "http://192.168.1.10:8080/restart" {
+		t.Errorf("restartAgentURL = %q", got)
+	}
+}
+
+func TestLookupRestartAction(t *testing.T) {
+	fa := newFakeAgent(t, "node1")
+	seedRestartState(t, fa)
+
+	if cmd, ok := lookupRestartAction(fa.address(), "plex"); !ok || cmd != "systemctl restart plex" {
+		t.Errorf("lookupRestartAction = %q, %v; want the advertised command", cmd, ok)
+	}
+	if _, ok := lookupRestartAction(fa.address(), "nope"); ok {
+		t.Error("lookupRestartAction found an action for an unadvertised service")
+	}
+	if _, ok := lookupRestartAction("other:1", "plex"); ok {
+		t.Error("lookupRestartAction matched the wrong agent address")
 	}
 }

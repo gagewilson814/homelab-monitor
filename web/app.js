@@ -104,12 +104,18 @@ function metricRow(label, pct, history) {
 
 // Build one service-check row (name + up/down dot) for a card. The name
 // comes straight from the polled agent, so it's untrusted input as far as
-// this dashboard is concerned - escape it.
-function serviceRow(svc) {
+// this dashboard is concerned - escape it. A service whose agent
+// advertises a restart action (svc.action set) also gets a restart
+// button; the button carries data-* attributes the delegated click handler
+// below reads to arm the confirm modal.
+function serviceRow(svc, address) {
+  const restartBtn = svc.action
+    ? `<button class="restart-btn" type="button" data-service="${escapeHtml(svc.name)}" data-address="${escapeHtml(address)}" aria-label="Restart ${escapeHtml(svc.name)}">Restart</button>`
+    : "";
   return `
     <div class="metric">
       <span class="service-name"><span class="dot${svc.up ? "" : " bad"}"></span>${escapeHtml(svc.name)}</span>
-      <span>${svc.up ? "up" : "down"}</span>
+      <span class="service-actions">${restartBtn}<span>${svc.up ? "up" : "down"}</span></span>
     </div>`;
 }
 
@@ -127,7 +133,7 @@ function cardHeader(agent, online, primaryLabel) {
     >✎</button>`;
   return `
     <h2>
-      <span class="dot${online ? "" : " pulse"}"></span>${escapeHtml(primaryLabel)}${tagChip}
+      <span class="dot${online ? "" : " pulse"}"></span><span class="card-host">${escapeHtml(primaryLabel)}</span>${tagChip}
       <span class="card-header-actions">
         <span class="state-label">${online ? "online" : "offline"}</span>
         ${editBtn}
@@ -154,7 +160,7 @@ function renderCard(agent) {
 
   const d = agent.data;
   const h = agent.history || {};
-  const services = (d.services || []).map(serviceRow).join("");
+  const services = (d.services || []).map((svc) => serviceRow(svc, agent.address)).join("");
   return `
     <div class="card">
       ${cardHeader(agent, true, d.hostname)}
@@ -519,15 +525,117 @@ agentModal.addEventListener("click", (e) => {
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !agentModal.hidden) closeModal();
+  if (e.key === "Escape" && !restartModal.hidden) closeRestartModal();
 });
 
 // Event delegation: fleetEl's innerHTML is replaced wholesale on every
 // refresh, so a single listener on the stable container beats re-binding a
-// click handler per card-edit button on every render.
+// click handler per card-edit or restart button on every render.
 fleetEl.addEventListener("click", (e) => {
-  const btn = e.target.closest(".card-edit-btn");
-  if (!btn) return;
-  openEditModal(btn.dataset.address, btn.dataset.tag);
+  const editBtn = e.target.closest(".card-edit-btn");
+  if (editBtn) {
+    openEditModal(editBtn.dataset.address, editBtn.dataset.tag);
+    return;
+  }
+  const restartBtn = e.target.closest(".restart-btn[data-service]");
+  if (restartBtn) {
+    // The card's display name lives in .card-host (see cardHeader), so
+    // the confirm modal can name the machine the command will run on.
+    const host = restartBtn.closest(".card")?.querySelector(".card-host")?.textContent || "this host";
+    openRestartModal(restartBtn.dataset.service, restartBtn.dataset.address, host);
+  }
+});
+
+// --- Service restart confirm modal ----------------------------------------
+
+const restartModal = document.getElementById("restart-modal");
+const restartModalTitle = document.getElementById("restart-modal-title");
+const restartModalMessage = document.getElementById("restart-modal-message");
+const restartModalError = document.getElementById("restart-modal-error");
+const restartModalOutput = document.getElementById("restart-modal-output");
+const restartConfirmBtn = document.getElementById("restart-confirm-btn");
+const restartCancelBtn = document.getElementById("restart-cancel-btn");
+
+let restartService = null;
+let restartAddress = null;
+let restartRunning = false;
+
+function showRestartError(message) {
+  restartModalError.textContent = message;
+  restartModalError.hidden = false;
+}
+
+function openRestartModal(service, address, host) {
+  restartService = service;
+  restartAddress = address;
+  restartRunning = false;
+  restartModalTitle.textContent = `Restart ${service}`;
+  restartModalMessage.textContent = `Restart ${service}? This runs a configured command on ${host}.`;
+  restartModalError.hidden = true;
+  restartModalOutput.hidden = true;
+  restartModalOutput.textContent = "";
+  restartConfirmBtn.disabled = false;
+  restartConfirmBtn.hidden = false;
+  restartCancelBtn.textContent = "Cancel";
+  restartModal.hidden = false;
+  restartConfirmBtn.focus();
+}
+
+function closeRestartModal() {
+  if (restartRunning) return; // never strand a running restart
+  restartModal.hidden = true;
+  restartService = null;
+  restartAddress = null;
+}
+
+async function confirmRestart() {
+  if (!restartService || restartRunning) return;
+  restartRunning = true;
+  restartModalError.hidden = true;
+  restartConfirmBtn.disabled = true;
+  restartConfirmBtn.textContent = "Restarting…";
+  restartModalOutput.hidden = false;
+  restartModalOutput.textContent = "Running restart command…";
+
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(restartAddress)}/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ service: restartService }),
+    });
+    const text = await res.text();
+    let payload = null;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      // Non-JSON error bodies (e.g. plaintext http.Error responses).
+    }
+
+    if (!res.ok) {
+      // Prefer the agent's own output field (it carries the command's
+      // real output even on failure); fall back to the raw body.
+      const detail = payload?.output || text || `HTTP ${res.status}`;
+      showRestartError(`Restart failed: ${detail}`);
+      restartModalOutput.textContent = payload?.output ? `output:\n${payload.output}` : detail;
+    } else {
+      restartModalOutput.textContent = payload?.output ? `output:\n${payload.output}` : "Restart completed with no output.";
+      restartConfirmBtn.hidden = true;
+      restartCancelBtn.textContent = "Close";
+      refresh(); // pick up the new service state on the card
+    }
+  } catch (err) {
+    showRestartError(`Restart failed: ${err.message}`);
+  } finally {
+    restartRunning = false;
+    restartConfirmBtn.disabled = false;
+    restartConfirmBtn.textContent = "Restart";
+  }
+}
+
+restartConfirmBtn.addEventListener("click", confirmRestart);
+restartCancelBtn.addEventListener("click", closeRestartModal);
+restartModal.addEventListener("click", (e) => {
+  if (e.target === restartModal) closeRestartModal();
 });
 
 // Kick off the first load, then poll on the interval above.

@@ -100,6 +100,23 @@
   </div>
 </div>
 
+<div id="restart-modal" class="modal-overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="restart-modal-title">
+    <h3 id="restart-modal-title">Restart service</h3>
+    <p id="restart-modal-message" class="restart-modal-message"></p>
+    <p id="restart-modal-error" class="error-text" hidden></p>
+    <!-- Command output (or the progress note) after the operator confirms;
+         collapsed when the modal is in its confirm state. -->
+    <pre id="restart-modal-output" class="restart-output" hidden></pre>
+    <div class="modal-actions">
+      <div class="modal-actions-right">
+        <button id="restart-cancel-btn" class="modal-cancel-btn" type="button">Cancel</button>
+        <button id="restart-confirm-btn" class="restart-btn" type="button">Restart</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script src="register-sw.js"></script>
 <script src="app.js"></script>
 </body>

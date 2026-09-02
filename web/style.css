@@ -705,3 +705,47 @@ h1 { font-size: 1.25rem; margin: 0; letter-spacing: 0.01em; }
 }
 
 .danger-btn:hover { background: var(--bad); color: #1a0505; }
+
+/* --- Per-service restart button & confirm modal --------------------------- */
+
+.card-host { /* anchors the host name inside the h2 for JS text extraction */ }
+
+.service-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.restart-btn {
+  background: none;
+  border: 1px solid var(--warn);
+  color: var(--warn);
+  border-radius: 6px;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.72rem;
+  min-height: 28px;
+  cursor: pointer;
+}
+
+.restart-btn:hover { background: var(--warn); color: #1a0505; }
+.restart-btn:disabled { opacity: 0.6; cursor: default; }
+
+.restart-modal-message {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--text);
+}
+
+.restart-output {
+  margin: 0;
+  max-height: 10rem;
+  overflow: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.6rem 0.7rem;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted);
+}

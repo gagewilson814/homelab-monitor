@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +43,56 @@ const agentTokenHeader = "X-Homelab-Agent-Token"
 // existed - opting in requires setting HOMELAB_AGENT_TOKEN here *and* on
 // the backend that polls this agent.
 var agentToken = os.Getenv("HOMELAB_AGENT_TOKEN")
+
+// configuredActions maps a service name to the shell command that restarts
+// it, parsed once at startup from HOMELAB_ACTIONS. Commands come from the
+// operator's own env config on the agent machine - never from the network -
+// so there is no injection surface: request input only ever selects a key
+// of this map.
+var configuredActions = getConfiguredActions()
+
+// restartTimeout caps how long a restart command may run before its context
+// is cancelled and the process killed. A var (not a const) so tests can
+// shorten it instead of waiting out the full 60s.
+var restartTimeout = 60 * time.Second
+
+// restartResponse is the JSON body /restart replies with on both success
+// and failure; Status distinguishes them ("ok" vs "error").
+type restartResponse struct {
+	Service string `json:"service"`
+	Status  string `json:"status"`
+	Output  string `json:"output,omitempty"`
+}
+
+// getConfiguredActions parses HOMELAB_ACTIONS as comma-separated
+// name:command pairs (e.g. "jellyfin:systemctl restart jellyfin"). The
+// command itself may contain colons, so only the FIRST colon separates name
+// from command. Malformed entries are skipped with a log line rather than
+// failing startup, mirroring getConfiguredServices.
+func getConfiguredActions() map[string]string {
+	env := os.Getenv("HOMELAB_ACTIONS")
+	if env == "" {
+		return nil
+	}
+
+	actions := make(map[string]string)
+	for _, entry := range strings.Split(env, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+
+		name, command, found := strings.Cut(entry, ":")
+		name = strings.TrimSpace(name)
+		command = strings.TrimSpace(command)
+		if !found || name == "" || command == "" {
+			log.Printf("Skipping invalid HOMELAB_ACTIONS entry %q: expected name:command", entry)
+			continue
+		}
+		actions[name] = command
+	}
+	return actions
+}
 
 // validAgentToken reports whether a request's token header is acceptable:
 // always true when agentToken is unset, otherwise a constant-time compare
@@ -93,12 +147,14 @@ func getConfiguredServices() []serviceConfig {
 // A successful TCP connect counts as "up" without inspecting the payload,
 // which keeps this generic across arbitrary services.
 func checkService(svc serviceConfig) stats.ServiceStatus {
+	status := stats.ServiceStatus{Name: svc.Name, Port: svc.Port, Up: false, Action: configuredActions[svc.Name]}
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("localhost:%d", svc.Port), 2*time.Second)
 	if err != nil {
-		return stats.ServiceStatus{Name: svc.Name, Port: svc.Port, Up: false}
+		return status
 	}
 	conn.Close()
-	return stats.ServiceStatus{Name: svc.Name, Port: svc.Port, Up: true}
+	status.Up = true
+	return status
 }
 
 // checkServices runs every configured check concurrently, one goroutine per
@@ -180,6 +236,16 @@ func getCPUUsage() float64 {
 // homeHandler builds the stats payload and writes it as JSON to the client.
 // Every metric is gathered independently and defaults to 0 on error so a
 // single failing sensor never breaks the whole response.
+// actionNames lists a actions map's keys (sorted for stable log output).
+func actionNames(actions map[string]string) []string {
+	names := make([]string, 0, len(actions))
+	for name := range actions {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func homeHandler(w http.ResponseWriter, r *http.Request) {
 	if !validAgentToken(r.Header.Get(agentTokenHeader)) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -203,6 +269,72 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// restartHandler runs the configured restart command for one service.
+// The request body selects WHICH configured command runs - it is a map key
+// lookup, never a shell string - so a caller can only trigger commands the
+// operator put in HOMELAB_ACTIONS on this machine. Guarded by the same
+// agent token as /stats when HOMELAB_AGENT_TOKEN is set.
+func restartHandler(w http.ResponseWriter, r *http.Request) {
+	if !validAgentToken(r.Header.Get(agentTokenHeader)) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var body struct {
+		Service string `json:"service"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	name := strings.TrimSpace(body.Service)
+	command, ok := configuredActions[name]
+	if !ok {
+		http.Error(w, "no restart action configured for service", http.StatusNotFound)
+		return
+	}
+
+	output, err := runRestartCommand(r.Context(), command)
+	if err != nil {
+		log.Printf("Restart of %q failed: %v (output: %s)", name, err, output)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(restartResponse{Service: name, Status: "error", Output: output})
+		return
+	}
+
+	log.Printf("Restart of %q succeeded", name)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(restartResponse{Service: name, Status: "ok", Output: output})
+}
+
+// runRestartCommand executes command through the platform shell with a
+// restartTimeout context, returning its combined output. The shell wrapper
+// is what lets an operator write a pipeline or multiple statements as one
+// action; the command text itself only ever originates from env config.
+func runRestartCommand(parent context.Context, command string) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, restartTimeout)
+	defer cancel()
+
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.CommandContext(ctx, "cmd", "/c", command)
+	} else {
+		cmd = exec.CommandContext(ctx, "sh", "-c", command)
+	}
+	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(out), fmt.Errorf("restart command timed out after %s", restartTimeout)
+	}
+	return string(out), err
+}
+
 func main() {
 	// The port is configurable so several agents can run on one host during
 	// testing; it defaults to :8080 to match the documented fleet layout.
@@ -213,12 +345,16 @@ func main() {
 	if len(configuredServices) > 0 {
 		log.Println("Checking services:", configuredServices)
 	}
+	if len(configuredActions) > 0 {
+		log.Println("Restart actions configured:", actionNames(configuredActions))
+	}
 	if agentToken != "" {
-		log.Println("Agent token auth enabled (HOMELAB_AGENT_TOKEN set) - /stats requires a matching", agentTokenHeader, "header")
+		log.Println("Agent token auth enabled (HOMELAB_AGENT_TOKEN set) - /stats and /restart require a matching", agentTokenHeader, "header")
 	} else {
 		log.Println("Agent token auth disabled - set HOMELAB_AGENT_TOKEN on both this agent and the backend to require it")
 	}
 	http.HandleFunc("/stats", homeHandler)
+	http.HandleFunc("/restart", restartHandler)
 
 	// Explicit timeouts; the zero-value http.Server has none, so a stalled
 	// client would tie up a goroutine for as long as it likes.

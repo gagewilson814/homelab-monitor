@@ -25,4 +25,10 @@ type ServiceStatus struct {
 	Name string `json:"name"`
 	Port int    `json:"port"`
 	Up   bool   `json:"up"`
+	// Action is the shell command the Agent will run when asked to restart
+	// this service (from HOMELAB_ACTIONS on the agent machine). Empty means
+	// no restart is configured and the dashboard shows no restart button.
+	// It's agent-side config relayed for display only - the backend and the
+	// dashboard never get to choose what runs.
+	Action string `json:"action,omitempty"`
 }

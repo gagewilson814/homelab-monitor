@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"homeserver-monitor/internal/auth"
 	"homeserver-monitor/internal/notify"
 	"homeserver-monitor/internal/stats"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -427,6 +429,112 @@ func pollLoop(interval time.Duration) {
 	}
 }
 
+// restartAgentTimeout is how long the backend will wait on an agent's
+// /restart endpoint. The agent itself gives the restart command 60s, so
+// this bounds the backend's exposure to a hung agent rather than the
+// command runtime.
+const restartAgentTimeout = 10 * time.Second
+
+// restartAgentURL builds the agent /restart endpoint URL from a stored
+// agent address (host:port, the same "id" the agent store keys on).
+func restartAgentURL(address string) string {
+	return "http://" + address + "/restart"
+}
+
+// lookupRestartAction finds the restart command last advertised for service
+// on address in the cached fleet poll, so the request body sent to the
+// agent echoes agent-published config. The agent itself re-validates the
+// service against its own configured actions and never executes a command
+// it receives over the wire.
+func lookupRestartAction(address, service string) (string, bool) {
+	fleetCacheMu.RLock()
+	results := fleetCache
+	fleetCacheMu.RUnlock()
+
+	for _, res := range results {
+		if res.Address != address || res.Data == nil {
+			continue
+		}
+		for _, svc := range res.Data.Services {
+			if svc.Name == service && svc.Action != "" {
+				return svc.Action, true
+			}
+		}
+	}
+	return "", false
+}
+
+// restartAgentHandler relays a restart request for one service on one agent
+// (the {id} path value is the agent's address, the same key the agentstore
+// and dashboard use). It is auth-gated like every other /api endpoint; the
+// agent additionally guards /restart with its own shared token when
+// configured. The agent's JSON response - success or failure - is relayed
+// to the dashboard as-is so the operator sees the command's real output.
+func restartAgentHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	address := r.PathValue("id")
+	if !agentStore.Has(address) {
+		http.Error(w, "agent not found", http.StatusNotFound)
+		return
+	}
+
+	var body struct {
+		Service string `json:"service"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	service := strings.TrimSpace(body.Service)
+	if service == "" {
+		http.Error(w, "service is required", http.StatusBadRequest)
+		return
+	}
+
+	command, ok := lookupRestartAction(address, service)
+	if !ok {
+		http.Error(w, "no restart action configured for service", http.StatusBadRequest)
+		return
+	}
+
+	payload, err := json.Marshal(map[string]string{"service": service, "command": command})
+	if err != nil {
+		http.Error(w, "failed to encode request", http.StatusInternalServerError)
+		return
+	}
+
+	client := &http.Client{Timeout: restartAgentTimeout}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, restartAgentURL(address), bytes.NewReader(payload))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if agentToken != "" {
+		req.Header.Set(agentTokenHeader, agentToken)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, "agent unreachable: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Relay the agent's status and JSON body verbatim; its error shape
+	// (service/status/output) is what the dashboard renders.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Println("Error relaying agent restart response: ", err)
+	}
+}
+
 // fleetHandler serves the latest cached poll results as JSON. It doesn't
 // poll anything itself - pollLoop already keeps fleetCache fresh - so
 // requests return immediately instead of waiting on agent network calls.
@@ -670,6 +778,7 @@ func main() {
 	mux.HandleFunc("/api/fleet", authStore.RequireAPI(fleetHandler))
 	mux.HandleFunc("/api/alerts", authStore.RequireAPI(alertsHandler))
 	mux.HandleFunc("/api/agents", authStore.RequireAPI(agentsHandler))
+	mux.HandleFunc("POST /api/agents/{id}/restart", authStore.RequireAPI(restartAgentHandler))
 
 	// login.html/js/css must stay reachable without a session, or nobody
 	// could ever log in. Registered as exact paths so they win over the "/"
