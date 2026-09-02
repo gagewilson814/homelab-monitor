@@ -119,7 +119,7 @@ func TestLoginRejectsWrongMethod(t *testing.T) {
 	}
 }
 
-func TestLoginRejectsOversizedBody(t *testing.T) {
+func TestLoginOversizedBodyIs413(t *testing.T) {
 	s := newTestStore(t)
 
 	// Without a cap, an unauthenticated caller could force an allocation as
@@ -129,8 +129,11 @@ func TestLoginRejectsOversizedBody(t *testing.T) {
 	rr := httptest.NewRecorder()
 	s.LoginHandler(rr, req)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("oversized login body: code=%d, want 400", rr.Code)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized login body: code=%d, want 413", rr.Code)
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "too large") {
+		t.Errorf("413 body = %q", body)
 	}
 }
 

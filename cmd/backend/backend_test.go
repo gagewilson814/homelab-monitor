@@ -1318,3 +1318,19 @@ func loginForCookie(t *testing.T, store *auth.Store) *http.Cookie {
 	t.Fatal("no session cookie from login")
 	return nil
 }
+
+func TestLoginOversizedBodyIs413ViaBackendWiring(t *testing.T) {
+	store := newTestAuthStore(t)
+	handler := auth.LimitedLoginHandler(store, auth.NewLoginRateLimiter(10, 15*time.Second))
+
+	huge := `{"username":"admin","password":"` + strings.Repeat("a", 200*1024) + `"}`
+	rr := httptest.NewRecorder()
+	handler(rr, httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(huge)))
+
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body via wrapper: code=%d, want 413", rr.Code)
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "too large") {
+		t.Errorf("413 body = %q", body)
+	}
+}

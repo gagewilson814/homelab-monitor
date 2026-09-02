@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -86,6 +87,13 @@ func LimitedLoginHandler(store *Store, limiter *LoginRateLimiter) http.HandlerFu
 	return func(w http.ResponseWriter, r *http.Request) {
 		raw, err := readCappedBody(w, r)
 		if err != nil {
+			var maxErr *http.MaxBytesError
+			if errors.As(err, &maxErr) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusRequestEntityTooLarge)
+				json.NewEncoder(w).Encode(map[string]string{"error": "request body too large"})
+				return
+			}
 			http.Error(w, "invalid request body", http.StatusBadRequest)
 			return
 		}
