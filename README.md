@@ -110,6 +110,33 @@ HOMELAB_AGENT_TOKEN='some-long-random-string' go run ./cmd/agent
 
 This matters more once the dashboard is reachable from outside your home network (Tailscale, a VPN) rather than strictly a physical LAN: without it, anything that can reach an agent's port can read its stats, and - more importantly - anything that can reach the backend's poll path could stand in for a real agent and feed the dashboard whatever it wants. `HOMELAB_AGENT_TOKEN` closes that off cheaply, without needing TLS or per-agent certificates.
 
+### Per-service restart (optional)
+
+For any service you've configured with `HOMELAB_SERVICES`, you can also give the agent a restart command for it. Setting `HOMELAB_ACTIONS` (comma-separated `name:command` pairs, same style as `HOMELAB_SERVICES` — the name must match a service in `HOMELAB_SERVICES`, and only the *first* colon separates name from command, so commands containing colons work):
+
+```bash
+HOMELAB_SERVICES='jellyfin:8096,p9k:32400' \
+HOMELAB_ACTIONS='jellyfin:curl -X POST http://localhost:8096/healthcheck,p9k:docker restart p9k' \
+go run ./cmd/agent
+```
+
+When a service has an action configured, its row on the dashboard card gets a **Restart** button. Tapping it opens a confirmation modal ("Restart jellyfin? This runs a configured command on <host>."), and confirming POSTs `POST /api/agents/{id}/restart` with `{"service":"jellyfin"}` (session cookie required; `{id}` is the agent's `host:port`). The backend relays the request to that agent's `/restart` endpoint, the agent runs the command with a 60-second timeout, and the command's output is shown in the modal. The same is scriptable via the API:
+
+```bash
+curl -b cookies.txt -X POST localhost:9090/api/agents/192.168.1.12:8080/restart \
+  -d '{"service":"jellyfin"}'
+```
+
+The command runs **on the agent machine** — where the service lives — as whatever user the agent process runs as. It is your own config on your own machine, so it's your responsibility to make it safe (e.g. prefer `systemctl restart jellyfin` over hand-rolled kill logic, and don't put anything in an action you wouldn't run yourself at 3am).
+
+The security model, in order of what actually enforces it:
+
+- **The agent never runs a command it receives over the wire.** A restart request only *selects* a command by service name from the agent's own `HOMELAB_ACTIONS` config; the `command` field the backend sends along is an echo for observability and is ignored. There is no injection surface — request input is a map key, never a shell string.
+- **The agent's `/restart` endpoint is token-gated** whenever `HOMELAB_AGENT_TOKEN` is set (same header and value as `/stats`) — see [Securing agent polling](#securing-agent-polling).
+- **The dashboard path is behind login** (session cookie) and behind a confirm modal, so a fat-fingered tap doesn't bounce production services.
+
+**Testing locally:** the backend prefers the persisted `HOMELAB_AGENTS_FILE` (default `data/agents.json`) over `HOMELAB_AGENTS` once that file exists, so point `HOMELAB_AGENTS_FILE` at a scratch path (e.g. `/tmp/test-agents.json`) to avoid polling your real fleet while experimenting.
+
 ### Discord alerts (optional)
 
 Set `DISCORD_WEBHOOK_URL` to get a Discord message whenever an agent's online/offline state changes (e.g. a server dropping off the network). Alerts are debounced — an agent has to return the same result for `DISCORD_ALERT_THRESHOLD` consecutive background polls (default `2`, so ~10s at the default 5s poll interval) before a transition is confirmed, so a single dropped poll won't page you. Leave `DISCORD_WEBHOOK_URL` unset to disable alerting entirely.
@@ -187,6 +214,7 @@ Everything runs on the same platform you build on. The `gopsutil`-based stats te
 | `HOMELAB_AGENTS` | comma-separated `host:port` agents to poll - only used to seed `HOMELAB_AGENTS_FILE` the first time it doesn't exist | `localhost:8080,localhost:8081` |
 | `HOMELAB_AGENTS_FILE` | JSON file persisting the agent list/tags managed from the dashboard | `data/agents.json` |
 | `HOMELAB_AGENT_TOKEN` | shared secret sent to (backend) / required by (agent) `/stats` - set identically on both sides; see [Securing agent polling](#securing-agent-polling) | unset = agents unauthenticated |
+| `HOMELAB_ACTIONS` | agent restart commands, comma-separated `name:command` pairs (see [Per-service restart](#per-service-restart-optional)) | unset = no restart actions |
 | `HOMELAB_POLL_INTERVAL` | backend poll cadence, in seconds | `5` |
 | `DISCORD_WEBHOOK_URL` | Discord webhook for online/offline alerts (optional) | unset = no alerts |
 | `DISCORD_ALERT_THRESHOLD` | consecutive polls to confirm a transition | `2` |
@@ -213,7 +241,7 @@ Everything runs on the same platform you build on. The `gopsutil`-based stats te
 - [x] Add/remove/tag agents from the dashboard, persisted across restarts and logins (no more fixed two-agent env var)
 - [x] Metric history sparklines, an aggregated alerts view, and mobile-first chrome (bottom nav, loading/error/empty states)
 - [x] Security hardening: strict CSP, optional agent shared-secret auth (`HOMELAB_AGENT_TOKEN`), Discord mentions suppressed
-- [ ] Remote restart capability (deprioritized for now)
+- [x] Remote restart capability: per-service restart commands (`HOMELAB_ACTIONS`) triggered from the dashboard, run on the agent machine
 - [ ] SQL-backed dashboard with user login
 
 ## License
