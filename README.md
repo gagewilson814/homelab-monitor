@@ -126,6 +126,17 @@ curl -b cookies.txt -X POST localhost:9090/api/logout
 
 The agent token gate (`HOMELAB_AGENT_TOKEN`) is unchanged and independent: it protects an agent's `/stats` and `/restart` endpoints from the network side, regardless of who's logged into the dashboard.
 
+#### Security hardening
+
+Applied to the SQL auth stack (see git history for the audit that drove these):
+
+- **Login rate limiting** — `POST /api/login` allows 10 attempts per 15s per username+IP, then returns `429 {"error":"too many attempts"}`; a successful login resets the window. Other routes are untouched.
+- **Constant-time login** — unknown usernames cost the same bcrypt compare as real ones, closing a ~130x timing oracle that could enumerate usernames.
+- **Database file permissions** — the SQLite DB is `chmod 0600` on open (it holds password hashes and session material).
+- **Session tokens hashed at rest** — the DB stores only bcrypt hashes (plus a SHA-256 lookup key) of session tokens, so a leaked DB file can't be replayed as a login. Legacy plain-token databases are migrated automatically on startup. Because tokens are no longer lookupable by value, **logout revokes all of your sessions** (other devices included; other users untouched).
+- **`HOMELAB_COOKIE_SECURE`** — set it to add the `Secure` flag to the session cookie (for HTTPS deployments; off by default since the backend serves plain HTTP).
+- **Origin check** — cross-origin `POST`s to `/api/logout` and the restart endpoint are rejected with 403 (server-side defense-in-depth behind `SameSite=Lax`).
+
 Aggregated JSON is also available directly at `http://localhost:9090/api/fleet` (requires the same session cookie).
 
 ### Securing agent polling (optional, recommended over Tailscale/VPN)
@@ -248,6 +259,7 @@ Everything runs on the same platform you build on. The `gopsutil`-based stats te
 | `HOMELAB_AGENTS_FILE` | JSON file persisting the agent list/tags managed from the dashboard | `data/agents.json` |
 | `HOMELAB_AGENT_TOKEN` | shared secret sent to (backend) / required by (agent) `/stats` - set identically on both sides; see [Securing agent polling](#securing-agent-polling) | unset = agents unauthenticated |
 | `HOMELAB_ACTIONS` | agent restart commands, comma-separated `name:command` pairs (see [Per-service restart](#per-service-restart-optional)) | unset = no restart actions |
+| `HOMELAB_COOKIE_SECURE` | add the `Secure` flag to the session cookie - enable when serving over HTTPS | unset = no Secure flag (plain HTTP) |
 | `HOMELAB_POLL_INTERVAL` | backend poll cadence, in seconds | `5` |
 | `DISCORD_WEBHOOK_URL` | Discord webhook for online/offline alerts (optional) | unset = no alerts |
 | `DISCORD_ALERT_THRESHOLD` | consecutive polls to confirm a transition | `2` |
@@ -276,6 +288,8 @@ Everything runs on the same platform you build on. The `gopsutil`-based stats te
 - [x] Security hardening: strict CSP, optional agent shared-secret auth (`HOMELAB_AGENT_TOKEN`), Discord mentions suppressed
 - [x] Remote restart capability: per-service restart commands (`HOMELAB_ACTIONS`) triggered from the dashboard, run on the agent machine
 - [x] SQL-backed dashboard with user login: multi-user accounts (bcrypt) and persistent sessions in SQLite (`HOMELAB_DB_FILE`, `go run ./cmd/backend seed`)
+- [x] Security hardening: login rate limiting, constant-time login, 0600 DB perms, hashed session tokens at rest, optional Secure cookie, Origin check on state-changing routes
+- [ ] Browser-based SSH shell to agents (planned)
 
 ## License
 

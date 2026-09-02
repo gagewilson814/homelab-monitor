@@ -1177,3 +1177,144 @@ func TestEmptyAuthDBReportsZeroUsers(t *testing.T) {
 		t.Fatalf("UserCount on fresh db = %d, %v; want 0", n, err)
 	}
 }
+
+func TestLoginRateLimitedViaBackendWiring(t *testing.T) {
+	// Mirror production wiring: LimitedLoginHandler around the store, 10
+	// attempts per 15s.
+	store := newTestAuthStore(t)
+	limiter := auth.NewLoginRateLimiter(10, 15*time.Second)
+	handler := auth.LimitedLoginHandler(store, limiter)
+
+	attempt := func(password string) *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		handler(rr, httptest.NewRequest(http.MethodPost, "/api/login",
+			strings.NewReader(`{"username":"admin","password":"`+password+`"}`)))
+		return rr
+	}
+
+	for i := 0; i < 10; i++ {
+		if rr := attempt("wrong"); rr.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: code=%d, want 401", i+1, rr.Code)
+		}
+	}
+	rr := attempt("secret")
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("attempt 11: code=%d, want 429", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("429 content-type = %q, want application/json", ct)
+	}
+	if body := rr.Body.String(); !strings.Contains(body, "too many attempts") {
+		t.Errorf("429 body = %q", body)
+	}
+}
+
+func TestLoginRateLimitDoesNotAffectOtherRoutes(t *testing.T) {
+	// Fleet is wrapped in RequireAPI only - no limiter in the chain.
+	store := newTestAuthStore(t)
+	cookie := loginForCookie(t, store)
+
+	mux := http.NewServeMux()
+	limiter := auth.NewLoginRateLimiter(1, 15*time.Second)
+	mux.HandleFunc("/api/login", auth.LimitedLoginHandler(store, limiter))
+	mux.HandleFunc("/api/fleet", store.RequireAPI(fleetHandler))
+
+	// Burn the limiter's whole window on login...
+	for i := 0; i < 1; i++ {
+		mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/login",
+			strings.NewReader(`{"username":"admin","password":"wrong"}`)))
+	}
+	// ...and confirm /api/fleet is untouched by it.
+	req := httptest.NewRequest(http.MethodGet, "/api/fleet", nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("fleet through limiter-exhausted mux: code=%d, want 200", rr.Code)
+	}
+}
+
+func TestRestartRejectsCrossSiteOrigin(t *testing.T) {
+	store := newTestAuthStore(t)
+	cookie := loginForCookie(t, store)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/agents/{id}/restart", store.RequireAPI(requireSameOrigin(restartAgentHandler)))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/localhost:1/restart",
+		strings.NewReader(`{"service":"x"}`))
+	req.Host = "dashboard.example"
+	req.AddCookie(cookie)
+	req.Header.Set("Origin", "https://evil.example")
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin restart: code=%d, want 403", rr.Code)
+	}
+}
+
+func TestRestartAllowsSameOrigin(t *testing.T) {
+	store := newTestAuthStore(t)
+	cookie := loginForCookie(t, store)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/agents/{id}/restart", store.RequireAPI(requireSameOrigin(restartAgentHandler)))
+
+	// Origin matching Host passes the check (then fails later on unknown
+	// agent - the point is it got PAST the 403).
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/localhost:1/restart",
+		strings.NewReader(`{"service":"x"}`))
+	req.Host = "dashboard.example"
+	req.AddCookie(cookie)
+	req.Header.Set("Origin", "https://dashboard.example")
+
+	rr := httptest.NewRecorder()
+	mux.ServeHTTP(rr, req)
+	if rr.Code == http.StatusForbidden {
+		t.Fatal("same-origin restart was rejected by the Origin check")
+	}
+}
+
+func TestLogoutRejectsCrossSiteOrigin(t *testing.T) {
+	store := newTestAuthStore(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/logout", nil)
+	req.Host = "dashboard.example"
+	req.Header.Set("Origin", "https://evil.example")
+
+	rr := httptest.NewRecorder()
+	requireSameOrigin(store.LogoutHandler)(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin logout: code=%d, want 403", rr.Code)
+	}
+}
+
+func TestLogoutAllowsNoOriginHeader(t *testing.T) {
+	// Same-origin tools (curl, non-browser clients) send no Origin; the
+	// check must only fire on a present-and-mismatched one.
+	store := newTestAuthStore(t)
+	rr := httptest.NewRecorder()
+	requireSameOrigin(store.LogoutHandler)(rr, httptest.NewRequest(http.MethodPost, "/api/logout", nil))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("no-Origin logout: code=%d, want 204", rr.Code)
+	}
+}
+
+// loginForCookie logs into store as admin and returns the session cookie.
+func loginForCookie(t *testing.T, store *auth.Store) *http.Cookie {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	store.LoginHandler(rr, httptest.NewRequest(http.MethodPost, "/api/login",
+		strings.NewReader(`{"username":"admin","password":"secret"}`)))
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("login for cookie: code=%d", rr.Code)
+	}
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == "homelab_session" {
+			return c
+		}
+	}
+	t.Fatal("no session cookie from login")
+	return nil
+}

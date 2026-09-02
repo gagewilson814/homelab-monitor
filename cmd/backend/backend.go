@@ -18,6 +18,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -871,13 +872,19 @@ func runServer() {
 	agentStore = store
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/login", authStore.LoginHandler)
-	mux.HandleFunc("/api/logout", authStore.LogoutHandler)
+	// Login is the only unauthenticated route, so it's the only one that
+	// gets the brute-force rate limiter (10 attempts / 15s per username+IP).
+	loginLimiter := auth.NewLoginRateLimiter(10, 15*time.Second)
+	mux.HandleFunc("/api/login", auth.LimitedLoginHandler(authStore, loginLimiter))
+	// Logout and restart mutate state on behalf of the cookie, so they get
+	// a server-side Origin check as CSRF defense-in-depth (SameSite=Lax
+	// remains the primary control).
+	mux.HandleFunc("/api/logout", requireSameOrigin(authStore.LogoutHandler))
 	mux.HandleFunc("/api/me", authStore.RequireAPI(meHandler))
 	mux.HandleFunc("/api/fleet", authStore.RequireAPI(fleetHandler))
 	mux.HandleFunc("/api/alerts", authStore.RequireAPI(alertsHandler))
 	mux.HandleFunc("/api/agents", authStore.RequireAPI(agentsHandler))
-	mux.HandleFunc("POST /api/agents/{id}/restart", authStore.RequireAPI(restartAgentHandler))
+	mux.HandleFunc("POST /api/agents/{id}/restart", authStore.RequireAPI(requireSameOrigin(restartAgentHandler)))
 
 	// login.html/js/css must stay reachable without a session, or nobody
 	// could ever log in. Registered as exact paths so they win over the "/"
@@ -937,6 +944,35 @@ func meHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"id": user.ID, "username": user.Username})
+}
+
+// sameOrigin reports whether the request's Origin header (when present)
+// matches the Host the request was addressed to. A missing Origin is
+// allowed - same-site fetches, curl, and same-origin browsers vary in
+// whether they send it - but a present-and-mismatched Origin is exactly the
+// cross-site-request signature SameSite=Lax is supposed to catch, so this
+// is a server-side backstop for browsers that don't enforce it.
+func sameOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return u.Host == r.Host
+}
+
+// requireSameOrigin rejects cross-origin state-changing requests with 403.
+func requireSameOrigin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !sameOrigin(r) {
+			http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func serveFile(path string) http.HandlerFunc {

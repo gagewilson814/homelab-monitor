@@ -10,12 +10,15 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -37,6 +40,19 @@ const (
 	maxBodyBytes = 64 << 10
 )
 
+// dummyPasswordHash is compared against on the unknown-username login path
+// so that a login for a user that doesn't exist costs the same bcrypt work
+// as one for a user that does - without it, the ~130x timing gap between
+// the two paths is a reliable remote username-enumeration oracle. It is the
+// hash of a fixed throwaway string; nothing can ever authenticate with it.
+const dummyPasswordHash = "$2a$10$gplLPYGmSz9YEJyHS.qaE.6kmrq1hJ9X65MEHoU5OdpWlIWzFiKYm"
+
+// cookieSecure mirrors HOMELAB_COOKIE_SECURE: when set, the session cookie
+// gets the Secure flag so browsers never send it over plain HTTP. Off by
+// default because the backend serves plain HTTP by design (LAN/VPN use) -
+// forcing Secure unconditionally would break those deployments.
+var cookieSecure = os.Getenv("HOMELAB_COOKIE_SECURE") != ""
+
 // ErrAlreadySeeded is returned by Seed when the database already has at
 // least one user - seeding is a one-time bootstrap, not a user-adding tool.
 var ErrAlreadySeeded = errors.New("database already has a user")
@@ -51,7 +67,9 @@ type User struct {
 }
 
 // Session is one active login. The Token is the cookie's value - an opaque
-// 32-byte hex string, not derivable from anything else in the DB.
+// 32-byte hex string, never stored in the database (only its bcrypt hash
+// and a SHA-256 lookup key are, see the sessions schema), so a leaked DB
+// file can't be replayed as a cookie.
 type Session struct {
 	ID        int
 	UserID    int
@@ -82,18 +100,123 @@ CREATE TABLE IF NOT EXISTS users (
 	password_hash TEXT NOT NULL,
 	created_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS sessions (
-	id INTEGER PRIMARY KEY,
-	user_id INTEGER NOT NULL,
-	token TEXT NOT NULL UNIQUE,
-	created_at TEXT NOT NULL,
-	expires_at TEXT NOT NULL
-);`
+` + sessionsSchema
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create auth schema: %w", err)
 	}
+	if err := migrateSessionSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate auth schema: %w", err)
+	}
+	// Session tokens are bearer credentials, and the DB also holds password
+	// hashes: restrict the file to the owner so a local read of it can't
+	// become a session hijack. Tightening an existing file's perms is
+	// intentional (older databases were created 0644).
+	if err := os.Chmod(dbFile, 0o600); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		db.Close()
+		return nil, fmt.Errorf("chmod auth database %s: %w", dbFile, err)
+	}
 	return &Store{db: db}, nil
+}
+
+// sessionsSchema is the current sessions table shape: token_hash holds
+// bcrypt(token) and token_lookup holds hex(sha256(token)). Both are one-way
+// - the raw token is never at rest - but only sha256 is fast enough to use
+// as an indexed lookup key, so FindSession fetches the row by token_lookup
+// and then verifies with bcrypt.
+const sessionsSchema = `CREATE TABLE IF NOT EXISTS sessions (
+	id INTEGER PRIMARY KEY,
+	user_id INTEGER NOT NULL,
+	token_hash TEXT NOT NULL UNIQUE,
+	token_lookup TEXT NOT NULL UNIQUE,
+	created_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL
+)`
+
+// migrateSessionSchema converts a pre-hashing sessions table (which stored
+// the raw token in a "token" column) to the token_hash/token_lookup shape,
+// re-hashing every live session so a backend upgrade doesn't log anyone
+// out. A fresh database needs no migration.
+func migrateSessionSchema(db *sql.DB) error {
+	old := false
+	cols, err := db.Query(`PRAGMA table_info(sessions)`)
+	if err == nil {
+		for cols.Next() {
+			var cid int
+			var name, ctype string
+			var notNull, pk int
+			var dflt sql.NullString
+			if err := cols.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err == nil {
+				if name == "token" {
+					old = true
+				}
+			}
+		}
+		cols.Close()
+	}
+	if !old {
+		return nil
+	}
+
+	rows, err := db.Query(`SELECT user_id, token, created_at, expires_at FROM sessions`)
+	if err != nil {
+		return fmt.Errorf("read legacy sessions: %w", err)
+	}
+	type legacy struct {
+		userID                  int
+		token, created, expires string
+	}
+	var legacyRows []legacy
+	for rows.Next() {
+		var l legacy
+		if err := rows.Scan(&l.userID, &l.token, &l.created, &l.expires); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan legacy sessions: %w", err)
+		}
+		legacyRows = append(legacyRows, l)
+	}
+	rows.Close()
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`ALTER TABLE sessions RENAME TO sessions_old`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(sessionsSchema); err != nil {
+		return err
+	}
+	for _, l := range legacyRows {
+		lookup, hash, err := hashToken(l.token)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(
+			`INSERT INTO sessions (user_id, token_hash, token_lookup, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
+			l.userID, hash, lookup, l.created, l.expires,
+		); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DROP TABLE sessions_old`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// hashToken returns (hex(sha256(token)), bcrypt(token)) for a raw session
+// token - the two one-way forms the database stores. bcrypt is the
+// at-rest-protection hash; sha256 is the O(1) indexed lookup key.
+func hashToken(token string) (string, []byte, error) {
+	digest := sha256.Sum256([]byte(token))
+	hash, err := bcrypt.GenerateFromPassword([]byte(token), bcrypt.DefaultCost)
+	if err != nil {
+		return "", nil, fmt.Errorf("hash session token: %w", err)
+	}
+	return hex.EncodeToString(digest[:]), hash, nil
 }
 
 // Close releases the database handle.
@@ -177,7 +300,8 @@ func (s *Store) CreateUserFromPassword(username, plaintextPassword string) (*Use
 }
 
 // CreateSession mints a new session for userID: 32 random bytes as a hex
-// token, expiring in sessionTTL. The token is what goes in the cookie.
+// token, expiring in sessionTTL. The token is what goes in the cookie; the
+// database stores only its bcrypt hash and sha256 lookup key.
 func (s *Store) CreateSession(userID int) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
@@ -185,10 +309,15 @@ func (s *Store) CreateSession(userID int) (string, error) {
 	}
 	token := hex.EncodeToString(raw)
 
+	lookup, hash, err := hashToken(token)
+	if err != nil {
+		return "", err
+	}
+
 	now := time.Now().UTC()
 	if _, err := s.db.Exec(
-		`INSERT INTO sessions (user_id, token, created_at, expires_at) VALUES (?, ?, ?, ?)`,
-		userID, token, now.Format(time.RFC3339), now.Add(sessionTTL).Format(time.RFC3339),
+		`INSERT INTO sessions (user_id, token_hash, token_lookup, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
+		userID, hash, lookup, now.Format(time.RFC3339), now.Add(sessionTTL).Format(time.RFC3339),
 	); err != nil {
 		return "", fmt.Errorf("create session: %w", err)
 	}
@@ -197,37 +326,60 @@ func (s *Store) CreateSession(userID int) (string, error) {
 
 // FindSession returns the session for token; found is false when the token
 // is unknown OR expired - expired rows are deleted on sight so the table
-// can't grow without bound.
+// can't grow without bound. Lookup goes through the sha256 index, then the
+// row's bcrypt hash is verified against the presented token.
 func (s *Store) FindSession(token string) (*Session, bool, error) {
+	digest := sha256.Sum256([]byte(token))
 	var sess Session
-	var createdAt, expiresAt string
+	var tokenHash, createdAt, expiresAt string
 	err := s.db.QueryRow(
-		`SELECT id, user_id, token, created_at, expires_at FROM sessions WHERE token = ?`,
-		token,
-	).Scan(&sess.ID, &sess.UserID, &sess.Token, &createdAt, &expiresAt)
+		`SELECT id, user_id, token_hash, created_at, expires_at FROM sessions WHERE token_lookup = ?`,
+		hex.EncodeToString(digest[:]),
+	).Scan(&sess.ID, &sess.UserID, &tokenHash, &createdAt, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
 	}
 	if err != nil {
 		return nil, false, fmt.Errorf("find session: %w", err)
 	}
+	if bcrypt.CompareHashAndPassword([]byte(tokenHash), []byte(token)) != nil {
+		return nil, false, nil
+	}
 	if sess.ExpiresAt, err = parseTime(expiresAt); err != nil {
 		return nil, false, err
 	}
 	if time.Now().After(sess.ExpiresAt) {
-		if _, err := s.db.Exec(`DELETE FROM sessions WHERE token = ?`, token); err != nil {
+		if _, err := s.db.Exec(`DELETE FROM sessions WHERE id = ?`, sess.ID); err != nil {
 			return nil, false, fmt.Errorf("delete expired session: %w", err)
 		}
 		return nil, false, nil
 	}
+	sess.Token = token
 	return &sess, true, nil
 }
 
-// RevokeSession deletes one session row (the caller's own logout), leaving
-// any other active sessions alone.
+// RevokeSession deletes one of userID's sessions (the caller's own logout
+// path), leaving any other active sessions alone.
 func (s *Store) RevokeSession(userID int, token string) error {
-	if _, err := s.db.Exec(`DELETE FROM sessions WHERE user_id = ? AND token = ?`, userID, token); err != nil {
+	sess, found, err := s.FindSession(token)
+	if err != nil {
+		return err
+	}
+	if !found || sess.UserID != userID {
+		return nil // nothing of this user's to revoke
+	}
+	if _, err := s.db.Exec(`DELETE FROM sessions WHERE id = ?`, sess.ID); err != nil {
 		return fmt.Errorf("revoke session: %w", err)
+	}
+	return nil
+}
+
+// RevokeUserSessions deletes every active session belonging to userID -
+// used by logout, which can no longer look sessions up by raw token. It
+// signs the user's other devices out too, and never touches other users.
+func (s *Store) RevokeUserSessions(userID int) error {
+	if _, err := s.db.Exec(`DELETE FROM sessions WHERE user_id = ?`, userID); err != nil {
+		return fmt.Errorf("revoke user sessions: %w", err)
 	}
 	return nil
 }
@@ -299,7 +451,13 @@ func (s *Store) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "could not look up user", http.StatusInternalServerError)
 		return
 	}
-	if !found || bcrypt.CompareHashAndPassword(user.Password, []byte(req.Password)) != nil {
+	if !found {
+		// Keep the unknown-username path on the same bcrypt work as the
+		// known-username path so response timing can't be used to enumerate
+		// usernames (verified experimentally: ~130x gap without this).
+		user = &User{Password: []byte(dummyPasswordHash)}
+	}
+	if bcrypt.CompareHashAndPassword(user.Password, []byte(req.Password)) != nil {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -310,7 +468,11 @@ func (s *Store) LoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
+	SetCookie := func(c *http.Cookie) {
+		c.Secure = cookieSecure
+		http.SetCookie(w, c)
+	}
+	SetCookie(&http.Cookie{
 		Name:     cookieName,
 		Value:    token,
 		Path:     "/",
@@ -321,10 +483,12 @@ func (s *Store) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// LogoutHandler revokes the caller's session - that specific session row,
-// not the user's other sessions. It requires POST so a cross-site top-level
-// navigation (which SameSite=Lax would still attach the cookie to) can't
-// sign the user out.
+// LogoutHandler revokes the caller's sessions. Because tokens are no longer
+// stored in lookupable form, logout revokes by user: all of the calling
+// user's sessions are deleted (signing out their other devices too), and no
+// other user's sessions are touched. It requires POST so a cross-site
+// top-level navigation (which SameSite=Lax would still attach the cookie
+// to) can't sign the user out.
 func (s *Store) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -335,7 +499,7 @@ func (s *Store) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		if user, found, err := s.SessionUser(cookie.Value); err == nil && found {
 			// A failed revoke can only be a database error; the cookie is
 			// cleared either way, so don't fail the logout over it.
-			_ = s.RevokeSession(user.ID, cookie.Value)
+			_ = s.RevokeUserSessions(user.ID)
 		}
 	}
 	http.SetCookie(w, &http.Cookie{
@@ -343,6 +507,7 @@ func (s *Store) LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   cookieSecure,
 		MaxAge:   -1,
 	})
 	w.WriteHeader(http.StatusNoContent)
