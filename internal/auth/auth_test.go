@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -310,6 +311,9 @@ INSERT INTO sessions (user_id, token, created_at, expires_at) VALUES (1, 'legacy
 }
 
 func TestDBFileIsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX file permissions")
+	}
 	dbFile := filepath.Join(t.TempDir(), "auth.db")
 	s, err := Open(dbFile)
 	if err != nil {

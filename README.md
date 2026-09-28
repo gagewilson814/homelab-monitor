@@ -1,297 +1,118 @@
-# Home Server Monitoring Dashboard
+# Homelab Monitor
 
-A lightweight, self-hosted monitoring and control system for a home server fleet. A small Go agent runs on each machine and reports live system stats; a central backend and web dashboard (planned) will aggregate that data and allow authenticated remote actions like restarting a server, all accessible from a phone.
+Homelab Monitor is a small, self-hosted, read-only dashboard for a mixed
+Linux/Windows fleet. An agent runs on each monitored machine; the backend
+polls agents, tracks availability and resource use, sends optional Discord
+alerts, and serves a mobile-friendly dashboard.
 
-> 🚧 **Status: Work in progress.** This project is being built incrementally as a hands-on learning exercise. See the Roadmap below for what's actually done vs. planned.
+The project deliberately does **not** execute commands on monitored hosts.
+Remote restarts and browser SSH are out of scope.
 
-## Why
+## What it does
 
-Most existing monitoring tools are either overkill for a home lab or don't support mixed Linux/Windows environments cleanly. This project is scoped specifically for personal infrastructure: simple to deploy, works across OSes, and reachable from a phone without exposing anything to the public internet. Also, I just wanted to build something that I can use.
+- Collects hostname, CPU, memory, disk use, uptime, and optional local TCP
+  service checks from each agent.
+- Polls agents concurrently on a background schedule and keeps a cached
+  fleet view, metric trends, and last-seen time.
+- Sends debounced Discord alerts for host/service outages and sustained
+  CPU, memory, or disk thresholds.
+- Provides authenticated multi-user dashboard access with SQLite-backed
+  accounts and sessions.
+- Lets an authenticated user add, tag, and remove agent addresses.
 
 ## Architecture
 
-- **Agent** (Go) — runs on each monitored machine. Exposes a `/stats` HTTP endpoint that returns hostname, CPU usage, memory usage, disk usage, and uptime as JSON, plus the up/down status of any locally-configured services (see `HOMELAB_SERVICES` below). Uses [`gopsutil`](https://github.com/shirou/gopsutil) for cross-platform system metrics, and compiles to a single static binary for both Linux and Windows.
-- **Backend** (Go) — a central service running on the home network that polls all Agents concurrently on its own background schedule (one goroutine per agent, pull model — no NAT/port-forwarding complexity since everything stays on the home network or a VPN), aggregates the results into an in-memory cache, and serves that cache as JSON at `/api/fleet`. Polling and Discord alerting run independently of whether anyone has the dashboard open. Also serves the static frontend.
-- **Frontend** — a minimal vanilla JS/HTML/CSS dashboard served by the Backend. Polls `/api/fleet` every 5s (a fast read of the Backend's cache, not a live agent scrape) and renders live per-agent stat cards, including agents that are unreachable. Gated behind a login page; no database yet — see Roadmap.
-
-```
-[ Agent : Linux server ]  \
-[ Agent : Linux server ]   >---(Backend polls each Agent concurrently)---> [ Backend API :9090 ] ---> [ Web Dashboard ]
-[ Agent : Windows server]  /
+```text
+Linux / Windows host                  AWS EC2
++-------------------+             +----------------------------+
+| agent :8080       | <-Tailscale-| backend -> dashboard        |
+| /stats only       |             | SQLite + HTTPS via Serve    |
++-------------------+             +----------------------------+
 ```
 
-## Tech Stack
+Agents listen locally and are reachable only through your LAN or tailnet.
+For the recommended EC2 layout, the backend calls each agent over its
+Tailscale name or IP and the dashboard is exposed privately through
+Tailscale Serve. No EC2 inbound security-group rule is needed.
 
-| Layer     | Tech                                  |
-|-----------|----------------------------------------|
-| Agent     | Go, [gopsutil](https://github.com/shirou/gopsutil) |
-| Backend   | Go (goroutines for concurrent polling) |
-| Frontend  | Vanilla JavaScript + HTML/CSS (SQL-backed multi-user login planned) |
-| Auth      | Single-user session cookie (bcrypt password, in-memory sessions) |
+## Local quick start
 
-## Getting Started
-
-Requires [Go](https://go.dev/dl/) installed.
-
-### Agent
-
-Run one instance per monitored machine (or multiple locally on different ports for testing via `AGENT_PORT`):
+Install the Go version declared in `go.mod`, then run an agent:
 
 ```bash
-# run locally (defaults to :8080)
 go run ./cmd/agent
-
-# run on a different port
-AGENT_PORT=8081 go run ./cmd/agent
-
-# build a binary for the current OS
-go build -o agent ./cmd/agent
-
-# cross-compile for Windows from Linux/macOS (or vice versa)
-GOOS=windows GOARCH=amd64 go build -o agent.exe ./cmd/agent
 ```
 
-Once running, the Agent serves stats at:
-
-```
-GET http://<agent-host>:<port>/stats
-```
-
-To also check that specific services are answering on that machine (not just that the host itself is up), set `HOMELAB_SERVICES` to a comma-separated list of `name:port` pairs:
+The agent serves `GET /stats` on port `8080`. Add service checks with
+`HOMELAB_SERVICES`:
 
 ```bash
 HOMELAB_SERVICES='jellyfin:8096,plex:32400' go run ./cmd/agent
 ```
 
-Each check is a plain TCP dial to `localhost:<port>` — it confirms something is listening, not that the service is actually healthy. Results show up in the Agent's `/stats` response as a `services` array (`{"name": "jellyfin", "port": 8096, "up": true}`), render on the dashboard card, and get their own debounced Discord alert independent of the host-level up/down alert — a hung Jellyfin on an otherwise-healthy host now shows up.
-
-### Backend + Dashboard
-
-The backend must be run from the repo root (it serves the `web/` directory) or run through the go tool below. It polls its configured agents on its own background schedule, every `HOMELAB_POLL_INTERVAL` seconds (default `5`) — this runs continuously regardless of whether the dashboard is open, so alerting stays live even if nobody's looking at it.
-
-The agent list itself is *not* fixed at startup: the comma-separated `HOMELAB_AGENTS` env var (defaults to `localhost:8080,localhost:8081`) only seeds it the first time the backend ever runs. From then on the list lives in `HOMELAB_AGENTS_FILE` (default `data/agents.json`, created automatically) and is managed from the dashboard — see [Managing agents](#managing-agents) below. Changing `HOMELAB_AGENTS` after that file exists has no effect; edit or delete the file instead.
-
-The dashboard and `/api/fleet` require a login against user accounts stored in SQLite — see [Multi-user auth (SQL)](#multi-user-auth-sql) below. Create the first account with the seed command (the backend refuses to start until one exists):
+From the repository root, seed the first dashboard account and start the
+backend:
 
 ```bash
 go run ./cmd/backend seed
-# Admin username: admin
-# Password: <type your password, Enter>
-# Created user "admin". Log in at http://localhost:9090/
+HOMELAB_AGENTS='127.0.0.1:8080' go run ./cmd/backend
 ```
 
-Then run the backend:
+Open `http://localhost:9090/` and log in. `HOMELAB_AGENTS` only seeds the
+file-backed fleet on its first run; later changes are made in the dashboard
+or by editing the configured agents file.
 
-```bash
-# run locally, override which agents to poll
-HOMELAB_AGENTS="192.168.1.10:8080,192.168.1.11:8080" go run ./cmd/backend
+## Tailscale and EC2 deployment
+
+The deployment guide is [deploy/EC2_TAILSCALE.md](deploy/EC2_TAILSCALE.md).
+It covers an Amazon Linux EC2 backend, Session Manager (no SSH key or port
+22), Tailscale ACLs, private HTTPS through Tailscale Serve, systemd, and
+verification. The key deployment settings are:
+
+```ini
+# /etc/homelab-monitor/backend.env on EC2
+HOMELAB_PORT=127.0.0.1:9090
+HOMELAB_COOKIE_SECURE=1
+HOMELAB_AGENT_TOKEN=<one-long-random-secret>
+HOMELAB_AGENTS=server-a:8080,server-b:8080
 ```
 
-Then open the dashboard and log in:
-
-```
-http://localhost:9090/
-```
-
-Sessions are cookie-based (`homelab_session`, HttpOnly, SameSite=Lax) and last 24h; they're stored in the database, so they survive a backend restart. By default agents aren't authenticated - they're only expected to be reachable from the home network/VPN, not the public internet. If the backend is reachable from further away than that (e.g. over Tailscale, not just physically at home), set `HOMELAB_AGENT_TOKEN` - see [Securing agent polling](#securing-agent-polling) below.
-
-### Multi-user auth (SQL)
-
-Dashboard access is authenticated against SQLite-backed user accounts (via the pure-Go `modernc.org/sqlite` driver — no CGo, cross-compiles like everything else). This replaces the original single-user `HOMELAB_PASSWORD_HASH`: there is no longer a shared password, each account has its own username and bcrypt-hashed password.
-
-One-time setup — the backend refuses to start while the database has zero users:
-
-```bash
-go run ./cmd/backend seed
-# Admin username: admin
-# Password: <type your password, Enter>
-# Created user "admin". Log in at http://localhost:9090/
-```
-
-The database lives at `HOMELAB_DB_FILE` (default `data/homelab.db`) and is created on first run. Seeding is a one-time bootstrap: re-running `seed` against a populated database errors out with "<dbpath> already has a user - delete the DB file and re-run seed to start over", so a re-run can't quietly mint an extra admin.
-
-Logging in and out happens in the dashboard: the login page takes **username and password** (a refresh of the login page while already logged in shows "Logged in as …" and a logout button instead of the form), and the dashboard header shows the current user next to the status pill. Sessions are opaque tokens stored server-side, so **logging out revokes just that session** and everything survives a backend restart. The same flow is scriptable:
-
-```bash
-# log in (stores the session cookie in cookies.txt)
-curl -c cookies.txt -X POST localhost:9090/api/login \
-  -d '{"username":"admin","password":"..."}'
-
-# who am I
-curl -b cookies.txt localhost:9090/api/me
-
-# log out (revokes that session)
-curl -b cookies.txt -X POST localhost:9090/api/logout
-```
-
-The agent token gate (`HOMELAB_AGENT_TOKEN`) is unchanged and independent: it protects an agent's `/stats` and `/restart` endpoints from the network side, regardless of who's logged into the dashboard.
-
-#### Security hardening
-
-Applied to the SQL auth stack (see git history for the audit that drove these):
-
-- **Login rate limiting** — `POST /api/login` allows 10 attempts per 15s per username+IP, then returns `429 {"error":"too many attempts"}`; a successful login resets the window. Other routes are untouched.
-- **Constant-time login** — unknown usernames cost the same bcrypt compare as real ones, closing a ~130x timing oracle that could enumerate usernames.
-- **Database file permissions** — the SQLite DB is `chmod 0600` on open (it holds password hashes and session material).
-- **Session tokens hashed at rest** — the DB stores only bcrypt hashes (plus a SHA-256 lookup key) of session tokens, so a leaked DB file can't be replayed as a login. Legacy plain-token databases are migrated automatically on startup. Because tokens are no longer lookupable by value, **logout revokes all of your sessions** (other devices included; other users untouched).
-- **`HOMELAB_COOKIE_SECURE`** — set it to add the `Secure` flag to the session cookie (for HTTPS deployments; off by default since the backend serves plain HTTP).
-- **Origin check** — cross-origin `POST`s to `/api/logout` and the restart endpoint are rejected with 403 (server-side defense-in-depth behind `SameSite=Lax`).
-
-Aggregated JSON is also available directly at `http://localhost:9090/api/fleet` (requires the same session cookie).
-
-### Securing agent polling (optional, recommended over Tailscale/VPN)
-
-Set `HOMELAB_AGENT_TOKEN` to the same value on the backend *and* every agent that should require it, and the backend sends it as an `X-Homelab-Agent-Token` header on every poll - an agent with the token set rejects any request missing it or carrying the wrong one (`401`), and the mismatch shows up as that agent going "offline" on the dashboard rather than failing silently. Leave it unset (the default) to poll agents unauthenticated, same as before this existed.
-
-```bash
-# on the backend
-HOMELAB_AGENT_TOKEN='some-long-random-string' go run ./cmd/backend
-
-# on each agent
-HOMELAB_AGENT_TOKEN='some-long-random-string' go run ./cmd/agent
-```
-
-This matters more once the dashboard is reachable from outside your home network (Tailscale, a VPN) rather than strictly a physical LAN: without it, anything that can reach an agent's port can read its stats, and - more importantly - anything that can reach the backend's poll path could stand in for a real agent and feed the dashboard whatever it wants. `HOMELAB_AGENT_TOKEN` closes that off cheaply, without needing TLS or per-agent certificates.
-
-### Per-service restart (optional)
-
-For any service you've configured with `HOMELAB_SERVICES`, you can also give the agent a restart command for it. Setting `HOMELAB_ACTIONS` (comma-separated `name:command` pairs, same style as `HOMELAB_SERVICES` — the name must match a service in `HOMELAB_SERVICES`, and only the *first* colon separates name from command, so commands containing colons work):
-
-```bash
-HOMELAB_SERVICES='jellyfin:8096,p9k:32400' \
-HOMELAB_ACTIONS='jellyfin:systemctl restart jellyfin,p9k:docker restart p9k' \
-go run ./cmd/agent
-```
-
-When a service has an action configured, its row on the dashboard card gets a **Restart** button. Tapping it opens a confirmation modal ("Restart jellyfin? This runs a configured command on <host>."), and confirming POSTs `POST /api/agents/{id}/restart` with `{"service":"jellyfin"}` (session cookie required; `{id}` is the agent's `host:port`). The backend relays the request to that agent's `/restart` endpoint, the agent runs the command with a 60-second timeout, and the command's output is shown in the modal. The same is scriptable via the API:
-
-```bash
-curl -b cookies.txt -X POST localhost:9090/api/agents/192.168.1.12:8080/restart \
-  -d '{"service":"jellyfin"}'
-```
-
-If the request fails, the status code tells you which side to look at: `503 "agent offline - no recent poll data"` means the backend hasn't had a successful poll from that agent (connectivity or token problem), while `400 "no restart action configured for service"` means the agent answered but has no `HOMELAB_ACTIONS` entry for that service name.
-
-The command runs **on the agent machine** — where the service lives — as whatever user the agent process runs as. It is your own config on your own machine, so it's your responsibility to make it safe (e.g. prefer `systemctl restart jellyfin` over hand-rolled kill logic, and don't put anything in an action you wouldn't run yourself at 3am).
-
-The security model, in order of what actually enforces it:
-
-- **The agent never runs a command it receives over the wire.** A restart request only *selects* a command by service name from the agent's own `HOMELAB_ACTIONS` config; the `command` field the backend sends along is an echo for observability and is ignored. There is no injection surface — request input is a map key, never a shell string.
-- **The agent's `/restart` endpoint is token-gated** whenever `HOMELAB_AGENT_TOKEN` is set (same header and value as `/stats`) — see [Securing agent polling](#securing-agent-polling).
-- **The dashboard path is behind login** (session cookie) and behind a confirm modal, so a fat-fingered tap doesn't bounce production services.
-
-**Testing locally:** the backend prefers the persisted `HOMELAB_AGENTS_FILE` (default `data/agents.json`) over `HOMELAB_AGENTS` once that file exists, so point `HOMELAB_AGENTS_FILE` at a scratch path (e.g. `/tmp/test-agents.json`) to avoid polling your real fleet while experimenting.
-
-### Discord alerts (optional)
-
-Set `DISCORD_WEBHOOK_URL` to get a Discord message whenever an agent's online/offline state changes (e.g. a server dropping off the network). Alerts are debounced — an agent has to return the same result for `DISCORD_ALERT_THRESHOLD` consecutive background polls (default `2`, so ~10s at the default 5s poll interval) before a transition is confirmed, so a single dropped poll won't page you. Leave `DISCORD_WEBHOOK_URL` unset to disable alerting entirely.
-
-```bash
-DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/...' \
-go run ./cmd/backend
-```
-
-The same debounced alerting also covers sustained resource usage — an agent whose CPU, memory, or disk stays above `HOMELAB_CPU_THRESHOLD` / `HOMELAB_MEM_THRESHOLD` / `HOMELAB_DISK_THRESHOLD` (each default `90`%) for `DISCORD_ALERT_THRESHOLD` consecutive polls fires an alert, and another when it recovers.
-
-### Managing agents
-
-Add, remove, and tag agents from the dashboard itself instead of editing env vars — tap the blue **+** on the Overview tab to add one by `host:port` (the port must be a number from 1–65535), with an optional tag, e.g. "Plex server" — or tap a card's edit (✎) icon to rename its tag or remove it. Changes persist immediately to `HOMELAB_AGENTS_FILE` and survive both a logout and a backend restart; polling picks up an added/removed agent on its next cycle (within one `HOMELAB_POLL_INTERVAL`), while a tag edit shows up on the very next dashboard refresh.
-
-The same is available directly via the API (`POST`/`PUT`/`DELETE /api/agents`, all requiring the session cookie) if you'd rather script it:
-
-```bash
-# add an agent
-curl -b cookies.txt -X POST localhost:9090/api/agents \
-  -d '{"address":"192.168.1.12:8080","tag":"NAS"}'
-
-# retag an existing one
-curl -b cookies.txt -X PUT localhost:9090/api/agents \
-  -d '{"address":"192.168.1.12:8080","tag":"Backup box"}'
-
-# remove one
-curl -b cookies.txt -X DELETE 'localhost:9090/api/agents?address=192.168.1.12:8080'
-```
-
-### Last seen
-
-Every fleet entry carries a `last_seen` timestamp — the last time that agent was successfully polled. It's tracked automatically (no config needed) and persists through an outage, so an offline card shows *when* it went down instead of just that it's down.
-
-### Installable dashboard (PWA)
-
-The dashboard is installable — most browsers offer an "Install" / "Add to Home Screen" prompt once you've logged in. A service worker caches the static app shell so a refresh works even with a flaky connection, and falls back to the last-known fleet data if `/api/fleet` is briefly unreachable.
-
-### Running as a service
-
-See [`deploy/README.md`](deploy/README.md) for systemd unit files (Linux) and a Windows service note, so the Agent/Backend survive a reboot without a terminal left open.
-
-## Testing
-
-Tests use the standard library `testing` framework with `net/http/httptest` fakes wherever a live dependency would be needed (a fake Agent server and a recording Discord notifier), so the whole suite runs with no network access:
-
-```bash
-# run the whole suite
- go test ./...
-
-# one package, or a single test by name
- go test ./internal/auth/ -run TestValid
-
-# race detector
- go test -race ./...
-```
-
-| Package | What's tested |
-|---------|---------------|
-| `internal/auth` | login/logout flow, bad password, missing hash, oversized body, logout method |
-| `internal/stats` | `stats()` response shape + JSON wire format |
-| `internal/notify` | Discord `Send` is a no-op when the webhook is unset; error on a bad status; errors don't leak the webhook token; mentions are suppressed |
-| `internal/alert` | debounce thresholds, online/offline transitions, forgetting a removed agent |
-| `internal/agentstore` | persisted agent CRUD, address validation, UTF-8-safe tag limits, atomic writes surviving a reload |
-| `cmd/backend` | `poll`/`pollAll` error handling, alert transitions, threshold alerts, last-seen tracking, fleet/alerts/agents handlers + auth gate, agent-list parsing, agent-token header, CSP header |
-
-Everything runs on the same platform you build on. The `gopsutil`-based stats tests only cover the host they run on, but the backend and agent logic is platform-independent.
+Set the same `HOMELAB_AGENT_TOKEN` on every agent. It is defense in depth:
+Tailscale controls network reachability, while the token prevents an
+unauthorized peer from reading or impersonating an agent response.
 
 ## Configuration
 
-| Env var | Purpose | Default |
-|---------|---------|---------|
-| `HOMELAB_PORT` | backend listen address (host:port); overridable so multiple instances (dev/test) can run side by side without port collisions | `:9090` |
-| `HOMELAB_DB_FILE` | SQLite database file for users/sessions; created by the seed command (replaces the old `HOMELAB_PASSWORD_HASH` - see [Multi-user auth (SQL)](#multi-user-auth-sql)) | `data/homelab.db` |
-| `HOMELAB_AGENTS` | comma-separated `host:port` agents to poll - only used to seed `HOMELAB_AGENTS_FILE` the first time it doesn't exist | `localhost:8080,localhost:8081` |
-| `HOMELAB_AGENTS_FILE` | JSON file persisting the agent list/tags managed from the dashboard | `data/agents.json` |
-| `HOMELAB_AGENT_TOKEN` | shared secret sent to (backend) / required by (agent) `/stats` - set identically on both sides; see [Securing agent polling](#securing-agent-polling) | unset = agents unauthenticated |
-| `HOMELAB_ACTIONS` | agent restart commands, comma-separated `name:command` pairs (see [Per-service restart](#per-service-restart-optional)) | unset = no restart actions |
-| `HOMELAB_COOKIE_SECURE` | add the `Secure` flag to the session cookie - enable when serving over HTTPS | unset = no Secure flag (plain HTTP) |
-| `HOMELAB_POLL_INTERVAL` | backend poll cadence, in seconds | `5` |
-| `DISCORD_WEBHOOK_URL` | Discord webhook for online/offline alerts (optional) | unset = no alerts |
-| `DISCORD_ALERT_THRESHOLD` | consecutive polls to confirm a transition | `2` |
-| `HOMELAB_CPU_THRESHOLD` | CPU usage % that triggers a threshold alert | `90` |
-| `HOMELAB_MEM_THRESHOLD` | memory usage % that triggers a threshold alert | `90` |
-| `HOMELAB_DISK_THRESHOLD` | disk usage % that triggers a threshold alert | `90` |
+| Variable | Purpose | Default |
+|---|---|---|
+| `AGENT_PORT` | Agent listen port | `8080` |
+| `HOMELAB_SERVICES` | Agent-local `name:port` TCP checks | unset |
+| `HOMELAB_PORT` | Backend listen address | `:9090` |
+| `HOMELAB_DB_FILE` | SQLite users and sessions file | `data/homelab.db` |
+| `HOMELAB_AGENTS` | Initial comma-separated `host:port` seed list | `localhost:8080,localhost:8081` |
+| `HOMELAB_AGENTS_FILE` | Persisted fleet configuration | `data/agents.json` |
+| `HOMELAB_AGENT_TOKEN` | Shared token required by agent `/stats` and sent by backend polls | unset |
+| `HOMELAB_COOKIE_SECURE` | Add the Secure flag to dashboard cookies; enable behind HTTPS | unset |
+| `HOMELAB_POLL_INTERVAL` | Poll frequency in seconds | `5` |
+| `DISCORD_WEBHOOK_URL` | Discord alert webhook | unset |
+| `DISCORD_ALERT_THRESHOLD` | Consecutive polls before an alert state changes | `2` |
+| `HOMELAB_CPU_THRESHOLD` | CPU alert percentage | `90` |
+| `HOMELAB_MEM_THRESHOLD` | Memory alert percentage | `90` |
+| `HOMELAB_DISK_THRESHOLD` | Disk alert percentage | `90` |
 
-## Roadmap
+Example environment files and systemd units live in `deploy/`.
 
-- [x] Walking-skeleton HTTP server with `/stats` endpoint
-- [x] Real hostname, CPU, and memory metrics via `gopsutil`
-- [x] Real disk usage metrics
-- [x] Real uptime metrics
-- [x] Backend service that polls Agents across the home network (concurrent, via goroutines)
-- [x] Minimal web dashboard (no SQL yet - agent config is a JSON file)
-- [x] Single-user session-cookie authentication for the dashboard/API (non-negotiable before restart ships)
-- [x] Discord alerts on agent online/offline transitions (debounced)
-- [x] Backend polls on its own background schedule, independent of the dashboard being open
-- [x] Service-level checks (e.g. is Jellyfin's port actually answering, not just the host)
-- [x] Mobile-friendly / installable (PWA) dashboard access
-- [x] Threshold alerts (sustained high CPU/mem, disk nearing full)
-- [x] "Last seen" timestamp per agent on the dashboard
-- [x] Agents run as a system service (systemd/Windows service) so they survive a reboot unattended
-- [x] Add/remove/tag agents from the dashboard, persisted across restarts and logins (no more fixed two-agent env var)
-- [x] Metric history sparklines, an aggregated alerts view, and mobile-first chrome (bottom nav, loading/error/empty states)
-- [x] Security hardening: strict CSP, optional agent shared-secret auth (`HOMELAB_AGENT_TOKEN`), Discord mentions suppressed
-- [x] Remote restart capability: per-service restart commands (`HOMELAB_ACTIONS`) triggered from the dashboard, run on the agent machine
-- [x] SQL-backed dashboard with user login: multi-user accounts (bcrypt) and persistent sessions in SQLite (`HOMELAB_DB_FILE`, `go run ./cmd/backend seed`)
-- [x] Security hardening: login rate limiting, constant-time login, 0600 DB perms, hashed session tokens at rest, optional Secure cookie, Origin check on state-changing routes
-- [ ] Browser-based SSH shell to agents (planned)
+## Test
 
-## License
+```bash
+go test ./...
+go test -race ./...
+```
 
-TBD
+## Current scope
+
+The monitoring stack is ready for a small personal fleet. Before calling a
+deployment complete, run the EC2/Tailscale guide, add the real agents, and
+verify polling and dashboard access from a second tailnet device. Future
+work should focus on operational polish such as automated build releases,
+database backups, and dashboard usability—not remote host control.

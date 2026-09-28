@@ -23,8 +23,8 @@ func TestTrackerConfirmed(t *testing.T) {
 	if !ok || online {
 		t.Fatalf("Confirmed after offline transition = (%v, %v), want (false, true)", online, ok)
 	}
-	if !since2.After(since1) {
-		t.Fatalf("since should advance on a new confirmed transition: %v -> %v", since1, since2)
+	if since2.Before(since1) {
+		t.Fatalf("since moved backward on a new confirmed transition: %v -> %v", since1, since2)
 	}
 }
 

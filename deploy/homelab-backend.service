@@ -1,7 +1,7 @@
 [Unit]
 Description=Homelab Monitor Backend
-After=network-online.target
-Wants=network-online.target
+After=network-online.target tailscale-online.target
+Wants=network-online.target tailscale-online.target
 
 [Service]
 Type=simple

@@ -9,11 +9,13 @@ open with `go run`.
 1. Build the binaries you need:
 
    ```bash
-   go build -o /usr/local/bin/homelab-agent ./cmd/agent
+   go build -o homelab-agent ./cmd/agent
+   sudo install -m 0755 homelab-agent /usr/local/bin/homelab-agent
    # Backend also needs its ./web directory alongside the binary, plus a
    # writable data/ dir for the persisted agent list/tags (see below):
    sudo mkdir -p /opt/homelab-monitor/data
-   go build -o /opt/homelab-monitor/homelab-backend ./cmd/backend
+   go build -o homelab-backend ./cmd/backend
+   sudo install -m 0755 homelab-backend /opt/homelab-monitor/homelab-backend
    sudo cp -r web /opt/homelab-monitor/web
    ```
 
@@ -29,20 +31,20 @@ open with `go run`.
    running:
 
    ```bash
-   sudo mkdir -p /etc/homelab-monitor
+   sudo install -d -m 0750 -o root -g homelab /etc/homelab-monitor
    sudo cp deploy/agent.env.example /etc/homelab-monitor/agent.env      # if running the Agent
    sudo cp deploy/backend.env.example /etc/homelab-monitor/backend.env  # if running the Backend
-   sudo chmod 600 /etc/homelab-monitor/*.env
-   sudo chown homelab:homelab /etc/homelab-monitor/*.env
+   sudo chmod 640 /etc/homelab-monitor/*.env
+   sudo chown root:homelab /etc/homelab-monitor/*.env
    ```
 
-   Edit `backend.env` - set `HOMELAB_DB_FILE` if you don't want the default
-   `data/homelab.db` location, and fill in `HOMELAB_AGENTS` (or it defaults
+   Edit `backend.env` and fill in `HOMELAB_AGENTS` (or it defaults
    to `localhost:8080,localhost:8081`). Then create the first dashboard user
-   (the backend refuses to start before this):
+   against the same database path the service uses (the backend refuses to
+   start before this):
 
    ```bash
-   sudo -u homelab /opt/homelab-monitor/backend seed
+   sudo -u homelab env HOMELAB_DB_FILE=/opt/homelab-monitor/data/homelab.db /opt/homelab-monitor/homelab-backend seed
    ```
 
 4. Install and start the unit(s):
