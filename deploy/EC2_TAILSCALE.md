@@ -71,6 +71,7 @@ contains the older remote-control features.
 
 ```bash
 sudo dnf install -y git golang
+cd "$HOME"
 git clone --branch deploy/ec2-tailnet-monitor --single-branch https://github.com/gagewilson814/homelab-monitor.git
 cd homelab-monitor
 go version
@@ -82,6 +83,23 @@ sudo install -m 0755 homelab-backend /opt/homelab-monitor/homelab-backend
 sudo cp -r web /opt/homelab-monitor/web
 sudo chown -R root:root /opt/homelab-monitor/web
 ```
+
+Clone as your normal Session Manager user, without `sudo`. Session Manager
+may open in a system directory such as `/usr/bin`, which is not writable by
+that user. If you already cloned there with `sudo`, move only that checkout
+to a user-owned location before building:
+
+```bash
+cd /
+sudo mv -T /usr/bin/homelab-monitor /opt/homelab-monitor-src
+sudo chown -R "$(id -u):$(id -g)" /opt/homelab-monitor-src
+cd /opt/homelab-monitor-src
+git rev-parse --short HEAD
+GOMAXPROCS=1 go build -p 1 -trimpath -o homelab-backend ./cmd/backend
+```
+
+Stop and inspect the paths if `mv` reports that its destination already
+exists. Do not use Git's `safe.directory` setting to mask wrong ownership.
 
 If the distro `golang` package is older than the version in `go.mod`, install
 the matching Go release first, or build a Linux binary in CI/local development
