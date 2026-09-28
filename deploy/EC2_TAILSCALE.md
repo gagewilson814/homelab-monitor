@@ -65,18 +65,16 @@ stable within the tailnet and avoid hard-coding Tailscale IP addresses.
 
 ## 3. Install the backend
 
-First publish or transfer the cleaned source from this workspace. The EC2
-instance must not clone the older GitHub revision while the changes in this
-workspace are still uncommitted. Once the updated revision is available,
-open a Session Manager shell and build it there. The commands below assume
-the updated revision has been pushed to the project's GitHub repository.
+The monitoring-only revision is on the `deploy/ec2-tailnet-monitor` branch.
+Open a Session Manager shell and build that branch; the default branch still
+contains the older remote-control features.
 
 ```bash
 sudo dnf install -y git golang
-git clone https://github.com/gagewilson814/homelab-monitor.git
+git clone --branch deploy/ec2-tailnet-monitor --single-branch https://github.com/gagewilson814/homelab-monitor.git
 cd homelab-monitor
 go version
-go build -trimpath -o homelab-backend ./cmd/backend
+GOMAXPROCS=1 go build -p 1 -trimpath -o homelab-backend ./cmd/backend
 
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin homelab
 sudo install -d -o homelab -g homelab /opt/homelab-monitor/data
